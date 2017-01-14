@@ -1,6 +1,4 @@
 LIB=libiomp.a
-SRC=$(wildcard *.c)
-OBJ=$(patsubst %.c,%.o,$(SRC))
 
 CC=cc
 CFLAGS=-std=c99 -g -Wall -pipe -fPIC -fvisibility=hidden
@@ -8,21 +6,26 @@ CXX=c++
 CXXFLAGS=-std=c++14 -g -Wall -pipe -fPIC -fvisibility=hidden
 AR=ar
 ARFLAGS=rc
+LD=c++
 LDFLAGS=-lpthread
 
 all: $(LIB) test
 
 .PHONY: clean
 clean:
-	rm -f $(LIB) $(OBJ) test
+	rm -f $(LIB) iomp.o test test.o
 
 rebuild: clean all
 
-$(LIB): $(OBJ)
-	$(AR) $(ARFLAGS) $@ $^
+$(LIB): iomp.o
+	$(AR) $(ARFLAGS) $@ iomp.o
 
-test: test.cc $(OBJ)
-	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+test: test.o $(LIB)
+	$(LD) -o $@ test.o -L. -liomp $(LDFLAGS)
 
-%.o: %.c
+iomp.o: iomp.c
 	$(CC) -c $(CFLAGS) -o $@ $<
+
+test.o: test.cc
+	$(CXX) -c $(CXXFLAGS) -o $@ $<
+

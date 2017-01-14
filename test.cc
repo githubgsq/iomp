@@ -45,7 +45,8 @@ private:
 };
 
 int main(int argc, char* argv[]) {
-    signal(SIGINT, [](auto sig) noexcept {
+    signal(SIGPIPE, SIG_IGN);
+    signal(SIGINT, [](int sig) noexcept {
         g_loop = false;
     });
     std::atomic<uint64_t> count { 0 };
@@ -54,12 +55,12 @@ int main(int argc, char* argv[]) {
         fprintf(stderr, "socketpair fail: %s", strerror(errno));
         return -1;
     }
-    if (fcntl(sv[1], F_SETNOSIGPIPE, 1) == -1) {
-        fprintf(stderr, "fcntl fail: %s", strerror(errno));
-        return -1;
-    }
 
     std::vector<std::thread> cs;
+    cs.emplace_back(do_client, (int)sv[1], std::ref(count));
+    cs.emplace_back(do_client, (int)sv[1], std::ref(count));
+    cs.emplace_back(do_client, (int)sv[1], std::ref(count));
+    cs.emplace_back(do_client, (int)sv[1], std::ref(count));
     cs.emplace_back(do_client, (int)sv[1], std::ref(count));
     cs.emplace_back(do_client, (int)sv[1], std::ref(count));
     cs.emplace_back(do_client, (int)sv[1], std::ref(count));
@@ -83,7 +84,7 @@ int main(int argc, char* argv[]) {
     while (g_loop) {
         sleep(1);
         auto qps = count.exchange(0);
-        fprintf(stderr, "%llu qps(s)\n", qps);
+        fprintf(stderr, "%zu qps(s)\n", qps);
     }
     sv[1].close();
     for (auto& c: cs) {
@@ -101,8 +102,8 @@ void do_client(int sock, std::atomic<uint64_t>& count) noexcept {
         }
         data++;
         count++;
-        struct timespec to { 0, 50000 };
-        nanosleep(&to, nullptr);
+        //struct timespec to { 0, 50000 };
+        //nanosleep(&to, nullptr);
     }
 }
 

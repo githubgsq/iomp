@@ -56,9 +56,7 @@ iomp_t iomp_new(int nthread) {
         return NULL;
     }
     fcntl(iomp->intr[0], F_SETFL, fcntl(iomp->intr[0], F_GETFL, 0) | O_NONBLOCK);
-    fcntl(iomp->intr[0], F_SETNOSIGPIPE, 1);
     fcntl(iomp->intr[1], F_SETFL, fcntl(iomp->intr[1], F_GETFL, 0) | O_NONBLOCK);
-    fcntl(iomp->intr[1], F_SETNOSIGPIPE, 1);
     struct kevent ev;
     EV_SET(&ev, iomp->intr[0], EVFILT_READ, EV_ADD | EV_CLEAR, 0, 0, iomp);
     if (kevent(iomp->eventfd, &ev, 1, NULL, 0, NULL) == -1) {
@@ -80,9 +78,10 @@ iomp_t iomp_new(int nthread) {
     }
     pthread_mutex_lock(&iomp->lock);
     if (nthread <= 0) {
-        int32_t ncpu = 0;
+        int mib[2] = { CTL_HW, HW_NCPU };
+        int ncpu = 0;
         size_t len = sizeof(ncpu);
-        rv = sysctlbyname("hw.logicalcpu", &ncpu, &len, NULL, 0);
+        rv = sysctl(mib, 2, &ncpu, &len, NULL, 0);
         if (rv != 0) {
             IOMP_LOG("sysctlbyname fail: %s", strerror(rv));
             close(iomp->intr[1]);
@@ -91,7 +90,7 @@ iomp_t iomp_new(int nthread) {
             free(iomp);
             return NULL;
         }
-        nthread = (int)ncpu;
+        nthread = ncpu;
     }
     iomp->nthread = 0;
     iomp->threads = (pthread_t*)malloc(sizeof(*iomp->threads) * nthread);
@@ -173,11 +172,6 @@ void iomp_read(iomp_t iomp, const iomp_aio_t aio) {
         aio->complete(aio, 0);
         return;
     }
-    if (fcntl(aio->fildes, F_SETNOSIGPIPE, 1) == -1) {
-        aio->error = errno;
-        aio->complete(aio, 0);
-        return;
-    }
     struct kevent ev;
     EV_SET(&ev,
             aio->fildes, EVFILT_READ, EV_ADD | EV_ONESHOT, 0, aio->nbytes, aio);
@@ -235,7 +229,7 @@ void do_wait(iomp_t iomp, struct timespec* timeout) {
 }
 
 void do_stop_withlock(iomp_t iomp) {
-    IOMP_LOG("begin stop [blocked=%llu]", iomp->blocked);
+    IOMP_LOG("begin stop [blocked=%zu]", iomp->blocked);
     iomp->stop = 1;
     if (iomp->blocked) {
         do_interrupt(iomp);
