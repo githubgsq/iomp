@@ -16,7 +16,7 @@
 
 #define IOMP_EVENT_LIMIT 1024
 
-struct iomp {
+struct iomp_core {
     pthread_mutex_t lock;
     pthread_t* threads;
     int nthread;

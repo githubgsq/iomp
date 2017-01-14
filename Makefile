@@ -3,9 +3,9 @@ SRC=$(wildcard *.c)
 OBJ=$(patsubst %.c,%.o,$(SRC))
 
 CC=cc
-CFLAGS=-std=c11 -g -Wall -pipe -fPIC -fvisibility=hidden
+CFLAGS=-std=c99 -g -Wall -pipe -fPIC -fvisibility=hidden
 CXX=c++
-CXXFLAGS=-std=c++11 -g -Wall -pipe -fPIC -fvisibility=hidden
+CXXFLAGS=-std=c++14 -g -Wall -pipe -fPIC -fvisibility=hidden
 AR=ar
 ARFLAGS=rc
 LDFLAGS=-lpthread

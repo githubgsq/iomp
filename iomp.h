@@ -9,8 +9,8 @@ extern "C" {
 
 #define IOMP_API __attribute__((visibility("default")))
 
-struct iomp;
-typedef struct iomp* iomp_t;
+struct iomp_core;
+typedef struct iomp_core* iomp_t;
 
 #if 0
 struct iomp_signal {
@@ -35,7 +35,6 @@ struct iomp_aio {
     int timeout_ms;
     void (*complete)(struct iomp_aio* aio, int succ);
     int error;
-    void* udata;
 };
 typedef struct iomp_aio* iomp_aio_t;
 
@@ -50,6 +49,62 @@ IOMP_API int iomp_write(iomp_t iomp, const iomp_aio_t aio);
 
 #ifdef __cplusplus
 }
+
+#include <functional>
+
+namespace iomp {
+
+class IOMultiPlexer;
+
+class AsyncIO {
+public:
+    inline AsyncIO(int fildes, void* buf, size_t nbytes, int timeout_ms,
+            std::function<void(AsyncIO&, bool)>&& complete) noexcept:
+                _complete(complete) {
+        _aio.fildes = fildes;
+        _aio.buf = buf;
+        _aio.nbytes = nbytes;
+        _aio.timeout_ms = timeout_ms;
+        _aio.complete = on_complete;
+        _aio.error = 0;
+    }
+public:
+    inline operator ::iomp_aio_t() noexcept { return &_aio; }
+    inline operator const ::iomp_aio_t() const noexcept {
+        return const_cast<const ::iomp_aio_t>(&_aio);
+    }
+    inline ::iomp_aio_t operator->() noexcept { return &_aio; }
+    inline const ::iomp_aio_t operator->() const noexcept {
+        return const_cast<const ::iomp_aio_t>(&_aio);
+    }
+private:
+    static void on_complete(::iomp_aio_t aio, int succ) noexcept {
+        auto self = reinterpret_cast<AsyncIO*>(aio);
+        self->_complete(*self, succ);
+    }
+private:
+    struct ::iomp_aio _aio;
+    std::function<void(AsyncIO&, bool)> _complete;
+};
+
+class IOMultiPlexer {
+public:
+    inline explicit IOMultiPlexer(int nthread) noexcept:
+        _iomp(::iomp_new(nthread)) { }
+    inline ~IOMultiPlexer() noexcept {
+        if (_iomp) {
+            ::iomp_drop(_iomp);
+        }
+    }
+public:
+    inline explicit operator bool() noexcept { return _iomp != nullptr; }
+    inline void read(const AsyncIO& aio) noexcept { ::iomp_read(_iomp, aio); }
+private:
+    ::iomp_t _iomp;
+};
+
+} /* namespace iomp */
+
 #endif /* __cplusplus */
 
 #endif /* IOMP_H */
