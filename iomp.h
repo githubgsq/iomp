@@ -58,8 +58,9 @@ class IOMultiPlexer;
 
 class AsyncIO {
 public:
-    inline AsyncIO(int fildes, void* buf, size_t nbytes, int timeout_ms,
-            std::function<void(AsyncIO&, bool)>&& complete) noexcept:
+    inline AsyncIO(int fildes, void* buf, size_t nbytes,
+            std::function<void(AsyncIO&, bool)>&& complete,
+            int timeout_ms = -1) noexcept:
                 _complete(complete) {
         _aio.fildes = fildes;
         _aio.buf = buf;
@@ -89,6 +90,7 @@ private:
 
 class IOMultiPlexer {
 public:
+    inline IOMultiPlexer() noexcept: IOMultiPlexer(0) { }
     inline explicit IOMultiPlexer(int nthread) noexcept:
         _iomp(::iomp_new(nthread)) { }
     inline ~IOMultiPlexer() noexcept {

@@ -8,6 +8,8 @@
 #include <pthread.h>
 #include <sys/event.h>
 #include <sys/time.h>
+#include <sys/types.h>
+#include <sys/sysctl.h>
 #include "iomp.h"
 
 #define IOMP_LOG(fmt, ...) \
@@ -28,7 +30,7 @@ struct iomp_core {
 };
 
 static void* do_work(void* arg);
-static void do_wait(iomp_t iomp, struct timespec* timeout, int id);
+static void do_wait(iomp_t iomp, struct timespec* timeout);
 static void do_stop_withlock(iomp_t iomp);
 static void do_interrupt(iomp_t iomp);
 
@@ -54,7 +56,9 @@ iomp_t iomp_new(int nthread) {
         return NULL;
     }
     fcntl(iomp->intr[0], F_SETFL, fcntl(iomp->intr[0], F_GETFL, 0) | O_NONBLOCK);
+    fcntl(iomp->intr[0], F_SETNOSIGPIPE, 1);
     fcntl(iomp->intr[1], F_SETFL, fcntl(iomp->intr[1], F_GETFL, 0) | O_NONBLOCK);
+    fcntl(iomp->intr[1], F_SETNOSIGPIPE, 1);
     struct kevent ev;
     EV_SET(&ev, iomp->intr[0], EVFILT_READ, EV_ADD | EV_CLEAR, 0, 0, iomp);
     if (kevent(iomp->eventfd, &ev, 1, NULL, 0, NULL) == -1) {
@@ -75,6 +79,20 @@ iomp_t iomp_new(int nthread) {
         return NULL;
     }
     pthread_mutex_lock(&iomp->lock);
+    if (nthread <= 0) {
+        int32_t ncpu = 0;
+        size_t len = sizeof(ncpu);
+        rv = sysctlbyname("hw.logicalcpu", &ncpu, &len, NULL, 0);
+        if (rv != 0) {
+            IOMP_LOG("sysctlbyname fail: %s", strerror(rv));
+            close(iomp->intr[1]);
+            close(iomp->intr[0]);
+            close(iomp->eventfd);
+            free(iomp);
+            return NULL;
+        }
+        nthread = (int)ncpu;
+    }
     iomp->nthread = 0;
     iomp->threads = (pthread_t*)malloc(sizeof(*iomp->threads) * nthread);
     if (!iomp->threads) {
@@ -144,6 +162,22 @@ void iomp_read(iomp_t iomp, const iomp_aio_t aio) {
         aio->complete(aio, 0);
         return;
     }
+    int val = fcntl(aio->fildes, F_GETFL, 0);
+    if (val == -1) {
+        aio->error = errno;
+        aio->complete(aio, 0);
+        return;
+    }
+    if (fcntl(aio->fildes, F_SETFL, val | O_NONBLOCK) == -1) {
+        aio->error = errno;
+        aio->complete(aio, 0);
+        return;
+    }
+    if (fcntl(aio->fildes, F_SETNOSIGPIPE, 1) == -1) {
+        aio->error = errno;
+        aio->complete(aio, 0);
+        return;
+    }
     struct kevent ev;
     EV_SET(&ev,
             aio->fildes, EVFILT_READ, EV_ADD | EV_ONESHOT, 0, aio->nbytes, aio);
@@ -155,22 +189,19 @@ void iomp_read(iomp_t iomp, const iomp_aio_t aio) {
 }
 
 void* do_work(void* arg) {
-    static int seq = 0;
-    int id = seq++;
     iomp_t iomp = (iomp_t)arg;
     pthread_mutex_lock(&iomp->lock);
     while (!iomp->stop) {
-        do_wait(iomp, NULL, id);
+        do_wait(iomp, NULL);
     }
     if (iomp->blocked) {
         do_interrupt(iomp);
     }
-    IOMP_LOG("thread exit [%d]", id);
     pthread_mutex_unlock(&iomp->lock);
     return NULL;
 }
 
-void do_wait(iomp_t iomp, struct timespec* timeout, int id) {
+void do_wait(iomp_t iomp, struct timespec* timeout) {
     iomp->blocked++;
     pthread_mutex_unlock(&iomp->lock);
     int nevent = kevent(iomp->eventfd,
@@ -184,7 +215,7 @@ void do_wait(iomp_t iomp, struct timespec* timeout, int id) {
         if (ev->ident == iomp->intr[0]) {
             int buf = 0;
             read(iomp->intr[0], &buf, sizeof(buf));
-            IOMP_LOG("interrupted [%d]", id);
+            IOMP_LOG("interrupted");
         } else if (ev->filter == EVFILT_READ) {
             iomp_aio_t aio = (iomp_aio_t)ev->udata;
             ssize_t len = read(aio->fildes, aio->buf, aio->nbytes);

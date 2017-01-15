@@ -3,6 +3,8 @@
 #include <string.h>
 #include <errno.h>
 #include <signal.h>
+#include <atomic>
+#include <vector>
 #include <fcntl.h>
 #include <thread>
 #include <unistd.h>
@@ -11,36 +13,62 @@
 
 static bool g_loop = true;
 
-static void do_server(int sock, pid_t pid) noexcept;
-static void do_client(int sock) noexcept;
-static void do_stop(int sig) noexcept {
-    g_loop = false;
-}
+static void do_client(int sock, std::atomic<uint64_t>& count) noexcept;
+
+class ScopedFd {
+public:
+    inline ScopedFd() noexcept: _fd(-1) { }
+    inline explicit ScopedFd(int fd) noexcept: _fd(fd) { }
+    inline ~ScopedFd() noexcept {
+        this->close();
+    }
+    inline ScopedFd(ScopedFd&& rhs) noexcept: _fd(rhs._fd) {
+        rhs._fd = -1;
+    }
+    inline ScopedFd& operator=(ScopedFd&& rhs) noexcept {
+        _fd = rhs._fd;
+        rhs._fd = -1;
+        return *this;
+    }
+public:
+    inline explicit operator bool() noexcept { return _fd != -1; }
+    inline operator int() noexcept { return _fd; }
+    inline void close() noexcept {
+        if (_fd != -1) {
+            fprintf(stderr, "close %d\n", _fd);
+            ::close(_fd);
+        }
+        _fd = -1;
+    }
+private:
+    int _fd;
+};
 
 int main(int argc, char* argv[]) {
-    int sv[2] = { 0, 0 };
-    socketpair(AF_LOCAL, SOCK_STREAM, 0, sv);
-    fcntl(sv[0], F_SETNOSIGPIPE, 1);
-    fcntl(sv[1], F_SETNOSIGPIPE, 1);
-    auto pid = fork();
-    if (pid == -1) {
-        fprintf(stderr, "fork fail: %s", strerror(errno));
+    signal(SIGINT, [](auto sig) noexcept {
+        g_loop = false;
+    });
+    std::atomic<uint64_t> count { 0 };
+    ScopedFd sv[2];
+    if (socketpair(AF_LOCAL, SOCK_STREAM, 0, reinterpret_cast<int*>(sv)) != 0) {
+        fprintf(stderr, "socketpair fail: %s", strerror(errno));
         return -1;
-    } else if (pid == 0) {
-        do_client(sv[1]);
-    } else {
-        do_server(sv[0], pid);
     }
-    return 0;
-}
+    if (fcntl(sv[1], F_SETNOSIGPIPE, 1) == -1) {
+        fprintf(stderr, "fcntl fail: %s", strerror(errno));
+        return -1;
+    }
 
-void do_server(int sock, pid_t client) noexcept {
-    signal(SIGINT, SIG_IGN);
-    fcntl(sock, F_SETFL, fcntl(sock, F_GETFL, 0) | O_NONBLOCK);
-    ::iomp::IOMultiPlexer iomp { 4 };
+    std::vector<std::thread> cs;
+    cs.emplace_back(do_client, (int)sv[1], std::ref(count));
+    cs.emplace_back(do_client, (int)sv[1], std::ref(count));
+    cs.emplace_back(do_client, (int)sv[1], std::ref(count));
+    cs.emplace_back(do_client, (int)sv[1], std::ref(count));
+
+    ::iomp::IOMultiPlexer iomp;
     uint64_t buf = 0;
     iomp.read({
-        sock, &buf, sizeof(buf), -1,
+        sv[0], &buf, sizeof(buf),
         [&iomp](auto aio, auto succ) noexcept {
             if (succ) {
                 iomp.read(aio);
@@ -51,34 +79,30 @@ void do_server(int sock, pid_t client) noexcept {
             }
         }
     });
-    waitpid(client, nullptr, 0);
-}
 
-void do_client(int sock) noexcept {
-    signal(SIGINT, do_stop);
-    std::atomic<uint64_t> count { 0 };
-    auto& loop = g_loop;
-    std::thread t { [&count, &loop](int sock) {
-        uint64_t data = 0xdeadc00dfacebabe;
-        while (1) {
-            auto len = write(sock, &data, sizeof(data));
-            if (len != sizeof(data)) {
-                fprintf(stderr, "write fail: %s\n", strerror(errno));
-                break;
-            }
-            data++;
-            count++;
-            struct timespec to { 0, 50000 };
-            nanosleep(&to, nullptr);
-        }
-        loop = false;
-    }, sock };
     while (g_loop) {
         sleep(1);
         auto qps = count.exchange(0);
         fprintf(stderr, "%llu qps(s)\n", qps);
     }
-    close(sock);
-    t.join();
+    sv[1].close();
+    for (auto& c: cs) {
+        c.join();
+    }
+}
+
+void do_client(int sock, std::atomic<uint64_t>& count) noexcept {
+    uint64_t data = 0xdeadc00dfacebabe;
+    while (1) {
+        auto len = write(sock, &data, sizeof(data));
+        if (len != sizeof(data)) {
+            fprintf(stderr, "write fail: %s\n", strerror(errno));
+            break;
+        }
+        data++;
+        count++;
+        struct timespec to { 0, 50000 };
+        nanosleep(&to, nullptr);
+    }
 }
 
