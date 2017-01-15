@@ -229,7 +229,7 @@ void do_wait(iomp_t iomp, struct timespec* timeout) {
 }
 
 void do_stop_withlock(iomp_t iomp) {
-    IOMP_LOG("begin stop [blocked=%zu]", iomp->blocked);
+    IOMP_LOG("begin stop [blocked=%zu]", (size_t)iomp->blocked);
     iomp->stop = 1;
     if (iomp->blocked) {
         do_interrupt(iomp);

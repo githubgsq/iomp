@@ -84,7 +84,7 @@ int main(int argc, char* argv[]) {
     while (g_loop) {
         sleep(1);
         auto qps = count.exchange(0);
-        fprintf(stderr, "%zu qps(s)\n", qps);
+        fprintf(stderr, "%zu qps(s)\n", (size_t)qps);
     }
     sv[1].close();
     for (auto& c: cs) {
