@@ -43,6 +43,7 @@ static void do_wait(iomp_t iomp, iomp_evlist_t evs);
 static void do_stop(iomp_t iomp, iomp_aio_t aio);
 static void do_interrupt(iomp_t iomp);
 static void do_read(iomp_t iomp, iomp_aio_t aio);
+static void do_write(iomp_t iomp, iomp_aio_t aio);
 
 iomp_t iomp_new(int nthreads) {
     iomp_t iomp = (iomp_t)malloc(sizeof(*iomp));
@@ -195,6 +196,21 @@ void iomp_read(iomp_t iomp, iomp_aio_t aio) {
     do_post(iomp, aio);
 }
 
+void iomp_write(iomp_t iomp, iomp_aio_t aio) {
+    if (!aio || !aio->complete || !aio->release) {
+        IOMP_LOG("invalid argument");
+        return;
+    }
+    iomp_addref(&aio->refcnt);
+    if (!iomp || !aio->buf || aio->nbytes == 0) {
+        IOMP_COMPLETE(aio, EINVAL);
+        return;
+    }
+    aio->offset = 0;
+    aio->execute = do_write;
+    do_post(iomp, aio);
+}
+
 void* do_work(void* arg) {
     iomp_t iomp = (iomp_t)arg;
     iomp_evlist_t evs = iomp_evlist_new(128);
@@ -252,8 +268,18 @@ void do_wait(iomp_t iomp, iomp_evlist_t evs) {
                 IOMP_LOG("interrupted");
             } else if (ev.flags & IOMP_EVENT_READ) {
                 iomp_aio_t aio = (iomp_aio_t)ev.udata;
-                ssize_t len = read(aio->fildes, aio->buf, aio->nbytes);
-                if (len == aio->nbytes) {
+                size_t todo = aio->nbytes - aio->offset;
+                ssize_t len = read(aio->fildes, aio->buf + aio->offset, todo);
+                if (len == todo) {
+                    IOMP_COMPLETE(aio, 0);
+                } else {
+                    IOMP_COMPLETE(aio, (len == -1 ? errno : -1));
+                }
+            } else if (ev.flags & IOMP_EVENT_WRITE) {
+                iomp_aio_t aio = (iomp_aio_t)ev.udata;
+                size_t todo = aio->nbytes - aio->offset;
+                ssize_t len = write(aio->fildes, aio->buf + aio->offset, todo);
+                if (len == todo) {
                     IOMP_COMPLETE(aio, 0);
                 } else {
                     IOMP_COMPLETE(aio, (len == -1 ? errno : -1));
@@ -284,6 +310,7 @@ void do_interrupt(iomp_t iomp) {
 void do_read(iomp_t iomp, iomp_aio_t aio) {
     size_t offset = 0;
     while (offset < aio->nbytes) {
+        // IOMP_LOG("read(%d, %p + %zu, %zu - %zu)", aio->fildes, aio->buf, offset, aio->nbytes, offset);
         ssize_t len = read(
                 aio->fildes,
                 aio->buf + offset,
@@ -292,7 +319,6 @@ void do_read(iomp_t iomp, iomp_aio_t aio) {
         if (len == -1) {
             if (errno == EAGAIN) {
                 aio->offset = offset;
-                aio->execute = do_read;
                 struct iomp_event ev;
                 IOMP_EVENT_SET(
                     &ev,
@@ -317,16 +343,43 @@ void do_read(iomp_t iomp, iomp_aio_t aio) {
         }
     }
     IOMP_COMPLETE(aio, 0);
-#if 0
-    int val = fcntl(aio->fildes, F_GETFL, 0);
-    if (val == -1) {
-        IOMP_COMPLETE(aio, errno);
-        return;
+}
+
+void do_write(iomp_t iomp, iomp_aio_t aio) {
+    size_t offset = 0;
+    while (offset < aio->nbytes) {
+        ssize_t len = write(
+                aio->fildes,
+                aio->buf + offset,
+                aio->nbytes - offset
+        );
+        IOMP_LOG("write(%d, %p + %zu, %zu - %zu) -> (%zd, %s)", aio->fildes, aio->buf, offset, aio->nbytes, offset, len, strerror(errno));
+        if (len == -1) {
+            if (errno == EAGAIN) {
+                aio->offset = offset;
+                struct iomp_event ev;
+                IOMP_EVENT_SET(
+                    &ev,
+                    aio->fildes,
+                    IOMP_EVENT_WRITE | IOMP_EVENT_ONCE,
+                    aio->nbytes - offset,
+                    aio
+                );
+                if (iomp_queue_post(iomp->queue, &ev) == -1) {
+                    IOMP_COMPLETE(aio, errno);
+                    return;
+                }
+            } else {
+                IOMP_COMPLETE(aio, errno);
+                return;
+            }
+        } else if (len == 0) {
+            IOMP_COMPLETE(aio, -1);
+            return;
+        } else {
+            offset += len;
+        }
     }
-    if (fcntl(aio->fildes, F_SETFL, val | O_NONBLOCK) == -1) {
-        IOMP_COMPLETE(aio, errno);
-        return;
-    }
-#endif
+    IOMP_COMPLETE(aio, 0);
 }
 

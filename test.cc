@@ -46,20 +46,31 @@ private:
 
 class Session {
 public:
-    inline Session(::iomp::IOMultiPlexer& iomp, std::atomic<uint64_t>& count) noexcept:
-            _client(&Session::do_client, _sv.client(), std::ref(count)) {
-        auto buf = new uint64_t(0);
-        iomp.read(_sv.server(), buf, sizeof(*buf), [&iomp](::iomp::AsyncIO& aio, int error) {
+    inline Session(::iomp::IOMultiPlexer& iomp, std::atomic<uint64_t>& count) noexcept/*:
+            _client(&Session::do_client, _sv.client(), std::ref(count))*/ {
+        int sv[2] = { -1, -1 };
+        if (socketpair(AF_LOCAL, SOCK_STREAM | SOCK_NONBLOCK, 0, sv) != 0) {
+            fprintf(stderr, "socketpair fail: %s\n", strerror(errno));
+            return;
+        }
+        fcntl(sv[0], F_SETFL, fcntl(sv[0], F_GETFL, 0) | O_NONBLOCK);
+        fcntl(sv[1], F_SETFL, fcntl(sv[1], F_GETFL, 0) | O_NONBLOCK);
+        /*auto buf = new uint64_t(0);
+        iomp.read(sv[0], buf, sizeof(*buf), [&iomp](::iomp::AsyncIO& aio, int error) {
             Session::do_server(iomp, aio, error);
+        });*/
+        auto buf2 = new uint64_t(0xdeadbeedfacebabe);
+        iomp.write(sv[1], buf2, sizeof(*buf2), [&iomp, &count](::iomp::AsyncIO& aio, int error) {
+            Session::do_client(iomp, aio, error, count);
         });
     }
     inline ~Session() noexcept {
-        _client.join();
+        //_client.join();
     }
 public:
     static void do_server(::iomp::IOMultiPlexer& iomp, ::iomp::AsyncIO& aio, int error) noexcept {
         if (error == 0) {
-            //fprintf(stderr, "got 0x%lx\n", *reinterpret_cast<uint64_t*>(aio.buf));
+            fprintf(stderr, "recv 0x%lx\n", *reinterpret_cast<uint64_t*>(aio.buf));
             iomp.read(aio);
         } else {
             if (error > 0) {
@@ -72,6 +83,26 @@ public:
             //shutdown(aio, SHUT_RDWR);
         }
     }
+    static void do_client(::iomp::IOMultiPlexer& iomp, ::iomp::AsyncIO& aio, int error,
+            std::atomic<uint64_t>& count) noexcept {
+        if (error == 0) {
+            auto& data = *reinterpret_cast<uint64_t*>(aio.buf);
+            fprintf(stderr, "send 0x%lx\n", data);
+            data++;
+            count++;
+            iomp.write(aio);
+        } else {
+            if (error > 0) {
+                fprintf(stderr, "write fail: %s\n", strerror(error));
+            } else {
+                fprintf(stderr, "write end\n");
+            }
+            delete reinterpret_cast<uint64_t*>(aio.buf);
+            close(aio);
+            //shutdown(aio, SHUT_RDWR);
+        }
+    }
+#if 0
     static void do_client(int sock, std::atomic<uint64_t>& count) {
         uint64_t data = 0xdeadbeeffacebabe;
         while (1) {
@@ -84,9 +115,10 @@ public:
             count++;
         }
     }
+#endif
 private:
-    SocketPair _sv;
-    std::thread _client;
+    //SocketPair _sv;
+    //std::thread _client;
 };
 
 int main(int argc, char* argv[]) {

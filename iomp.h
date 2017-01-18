@@ -123,6 +123,15 @@ public:
     inline void read(AsyncIO& aio) noexcept {
         ::iomp_read(_iomp, &aio);
     }
+    inline void write(int fildes, void* buf, size_t nbytes,
+            std::function<void(AsyncIO&, int)> complete,
+            int timeout=-1) noexcept {
+        ::iomp_write(_iomp,
+                new AsyncIO(fildes, buf, nbytes, complete, timeout));
+    }
+    inline void write(AsyncIO& aio) noexcept {
+        ::iomp_write(_iomp, &aio);
+    }
 private:
     ::iomp_t _iomp;
 };
