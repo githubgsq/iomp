@@ -68,7 +68,8 @@ public:
                 fprintf(stderr, "read end\n");
             }
             delete reinterpret_cast<uint64_t*>(aio.buf);
-            shutdown(aio, SHUT_RDWR);
+            close(aio);
+            //shutdown(aio, SHUT_RDWR);
         }
     }
     static void do_client(int sock, std::atomic<uint64_t>& count) {

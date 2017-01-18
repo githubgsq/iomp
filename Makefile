@@ -13,12 +13,12 @@ all: $(LIB) test
 
 .PHONY: clean
 clean:
-	rm -f $(LIB) iomp.o iomp_event.o iomp_epoll.o test test.o
+	rm -f $(LIB) iomp.o iomp_kqueue.o iomp_epoll.o test test.o
 
 rebuild: clean all
 
-$(LIB): iomp.o iomp_event.o iomp_epoll.o
-	$(AR) $(ARFLAGS) $@ iomp.o iomp_event.o iomp_epoll.o
+$(LIB): iomp.o iomp_kqueue.o iomp_epoll.o
+	$(AR) $(ARFLAGS) $@ iomp.o iomp_kqueue.o iomp_epoll.o
 
 test: test.o $(LIB)
 	$(LD) -o $@ test.o -L. -liomp $(LDFLAGS)
@@ -26,7 +26,7 @@ test: test.o $(LIB)
 iomp.o: iomp.c
 	$(CC) -c $(CFLAGS) -o $@ $<
 
-iomp_event.o: iomp_event.c
+iomp_kqueue.o: iomp_kqueue.c
 	$(CC) -c $(CFLAGS) -o $@ $<
 
 test.o: test.cc
