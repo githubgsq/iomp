@@ -268,7 +268,7 @@ void do_wait(iomp_t iomp, iomp_evlist_t evs) {
             if (ev.udata == iomp) {
                 int buf = 0;
                 read(iomp->intr[0], &buf, sizeof(buf));
-                IOMP_LOG("interrupted");
+                //IOMP_LOG("interrupted");
                 continue;
             }
             if (ev.flags & IOMP_EVENT_READ) {
