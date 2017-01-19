@@ -49,26 +49,26 @@ public:
     inline Session(::iomp::IOMultiPlexer& iomp, std::atomic<uint64_t>& count) noexcept:
             _client(&Session::do_client, _sv.client(), std::ref(count)) {
         auto buf = new uint64_t(0);
-        iomp.read(_sv.server(), buf, sizeof(*buf), [&iomp](::iomp::AsyncIO& aio, bool succ) {
-            Session::do_server(iomp, aio, succ);
+        iomp.read(_sv.server(), buf, sizeof(*buf), [&iomp](::iomp::AsyncIO& aio, int error) {
+            Session::do_server(iomp, aio, error);
         });
     }
     inline ~Session() noexcept {
         _client.join();
     }
 public:
-    inline void stop() noexcept {
-        shutdown(_sv.server(), SHUT_RDWR);
-    }
-    static void do_server(::iomp::IOMultiPlexer& iomp, ::iomp::AsyncIO& aio, bool succ) noexcept {
-        if (succ) {
+    static void do_server(::iomp::IOMultiPlexer& iomp, ::iomp::AsyncIO& aio, int error) noexcept {
+        if (error == 0) {
             //fprintf(stderr, "got 0x%lx\n", *reinterpret_cast<uint64_t*>(aio.buf));
             iomp.read(aio);
         } else {
-            if (aio.error != 0) {
-                fprintf(stderr, "read fail: %s\n", strerror(aio.error));
+            if (error > 0) {
+                fprintf(stderr, "read fail: %s\n", strerror(error));
+            } else {
+                fprintf(stderr, "read end\n");
             }
             delete reinterpret_cast<uint64_t*>(aio.buf);
+            shutdown(aio, SHUT_RDWR);
         }
     }
     static void do_client(int sock, std::atomic<uint64_t>& count) {
@@ -93,19 +93,17 @@ int main(int argc, char* argv[]) {
     signal(SIGINT, [](int sig) noexcept {
         g_loop = false;
     });
-    ::iomp::IOMultiPlexer iomp { 1 };
     std::atomic<uint64_t> count { 0 };
     std::vector<std::unique_ptr<Session>> sess;
-    for (int i = 0; i < 2; i++) {
+    ::iomp::IOMultiPlexer iomp { 1 };
+    for (int i = 0; i < 1; i++) {
         sess.emplace_back(std::unique_ptr<Session>(new Session(iomp, count)));
     }
-    while (g_loop) {
+    //while (g_loop) {
+    for (int i = 0; i < 5; i++) {
         sleep(1);
         auto qps = count.exchange(0);
         fprintf(stderr, "%zu qps(s)\n", (size_t)qps);
-    }
-    for (auto& s: sess) {
-        s->stop();
     }
     return 0;
 }

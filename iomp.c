@@ -18,10 +18,9 @@
 
 #define IOMP_EVENT_LIMIT 1024
 
-#define IOMP_COMPLETE(aio, succ, err) \
+#define IOMP_COMPLETE(aio, err) \
     do { \
-        (aio)->error = (err); \
-        (aio)->complete((aio), (succ)); \
+        (aio)->complete((aio), (err)); \
         if (iomp_release(&(aio)->refcnt) == 0) { \
             (aio)->release((aio)); \
         } \
@@ -29,27 +28,30 @@
 
 struct iomp_core {
     pthread_mutex_t lock;
+    STAILQ_HEAD(, iomp_aio) jobs;
     pthread_t* threads;
-    int nthread;
+    struct iomp_aio stop;
+    int nthreads;
     iomp_queue_t queue;
     uint64_t blocked;
     int intr[2];
-    unsigned stop:1;
 };
 
 static void* do_work(void* arg);
+static void do_post(iomp_t iomp, iomp_aio_t aio);
 static void do_wait(iomp_t iomp, iomp_evlist_t evs);
-static void do_stop_withlock(iomp_t iomp);
+static void do_stop(iomp_t iomp, iomp_aio_t aio);
 static void do_interrupt(iomp_t iomp);
+static void do_read(iomp_t iomp, iomp_aio_t aio);
 
-iomp_t iomp_new(int nthread) {
+iomp_t iomp_new(int nthreads) {
     iomp_t iomp = (iomp_t)malloc(sizeof(*iomp));
     if (!iomp) {
         IOMP_LOG("malloc fail: %s", strerror(errno));
         return NULL;
     }
+    STAILQ_INIT(&iomp->jobs);
     iomp->blocked = 0;
-    iomp->stop = 0;
     iomp->queue = iomp_queue_new();
     if (!iomp->queue) {
         IOMP_LOG("iomp_queue_new fail: %s", strerror(errno));
@@ -85,7 +87,7 @@ iomp_t iomp_new(int nthread) {
         return NULL;
     }
     pthread_mutex_lock(&iomp->lock);
-    if (nthread <= 0) {
+    if (nthreads <= 0) {
 #if defined(__APPLE__) || defined(__DragonFly__) || defined(__FreeBSD__) || defined(__OpenBSD__)
         int mib[2] = { CTL_HW, HW_NCPU };
         int ncpu = 0;
@@ -99,10 +101,10 @@ iomp_t iomp_new(int nthread) {
             free(iomp);
             return NULL;
         }
-        nthread = ncpu;
+        nthreads = ncpu;
 #elif defined(__linux__)
-        nthread = sysconf(_SC_NPROCESSORS_ONLN);
-        if (nthread == -1) {
+        nthreads = sysconf(_SC_NPROCESSORS_ONLN);
+        if (nthreads == -1) {
             IOMP_LOG("sysconf fail: %s", strerror(rv));
             close(iomp->intr[1]);
             close(iomp->intr[0]);
@@ -111,7 +113,7 @@ iomp_t iomp_new(int nthread) {
             return NULL;
         }
 #else
-        IOMP_LOG("require positive nthread");
+        IOMP_LOG("require positive nthreads");
         close(iomp->intr[1]);
         close(iomp->intr[0]);
         iomp_queue_drop(iomp->queue);
@@ -119,8 +121,10 @@ iomp_t iomp_new(int nthread) {
         return NULL;
 #endif
     }
-    iomp->nthread = 0;
-    iomp->threads = (pthread_t*)malloc(sizeof(*iomp->threads) * nthread);
+    iomp->nthreads = 0;
+    iomp->stop.fildes = -1;
+    iomp->stop.execute = do_stop;
+    iomp->threads = (pthread_t*)malloc(sizeof(*iomp->threads) * nthreads);
     if (!iomp->threads) {
         IOMP_LOG("malloc fail: %s", strerror(errno));
         pthread_mutex_destroy(&iomp->lock);
@@ -130,12 +134,12 @@ iomp_t iomp_new(int nthread) {
         free(iomp);
         return NULL;
     }
-    for (int i = 0; i < nthread; i++) {
+    for (int i = 0; i < nthreads; i++) {
         rv = pthread_create(iomp->threads + i, NULL, do_work, iomp);
         if (rv != 0) {
             IOMP_LOG("pthread_create fail: %s", strerror(rv));
         } else {
-            iomp->nthread++;
+            iomp->nthreads++;
         }
     }
     pthread_mutex_unlock(&iomp->lock);
@@ -146,10 +150,8 @@ void iomp_drop(iomp_t iomp) {
     if (!iomp) {
         return;
     }
-    pthread_mutex_lock(&iomp->lock);
-    do_stop_withlock(iomp);
-    pthread_mutex_unlock(&iomp->lock);
-    for (int i = 0; i < iomp->nthread; i++) {
+    do_post(iomp, &iomp->stop);
+    for (int i = 0; i < iomp->nthreads; i++) {
         pthread_join(iomp->threads[i], NULL);
     }
     free(iomp->threads);
@@ -178,35 +180,19 @@ int iomp_signal(iomp_t iomp, const iomp_signal_t sig) {
 }
 #endif
 
-int iomp_read(iomp_t iomp, iomp_aio_t aio) {
+void iomp_read(iomp_t iomp, iomp_aio_t aio) {
     if (!aio || !aio->complete || !aio->release) {
-        errno = EINVAL;
-        return -1;
+        IOMP_LOG("invalid argument");
+        return;
     }
     iomp_addref(&aio->refcnt);
-    if (!iomp) {
-        IOMP_COMPLETE(aio, 0, EINVAL);
-        return 0;
+    if (!iomp || !aio->buf || aio->nbytes == 0) {
+        IOMP_COMPLETE(aio, EINVAL);
+        return;
     }
-#if 0
-    int val = fcntl(aio->fildes, F_GETFL, 0);
-    if (val == -1) {
-        IOMP_COMPLETE(aio, 0, errno);
-        return 0;
-    }
-    if (fcntl(aio->fildes, F_SETFL, val | O_NONBLOCK) == -1) {
-        IOMP_COMPLETE(aio, 0, errno);
-        return 0;
-    }
-#endif
-    struct iomp_event ev;
-    IOMP_EVENT_SET(&ev,
-            aio->fildes, IOMP_EVENT_READ | IOMP_EVENT_ONCE, aio->nbytes, aio);
-    if (iomp_queue_post(iomp->queue, &ev) == -1) {
-        IOMP_COMPLETE(aio, 0, errno);
-        return 0;
-    }
-    return 0;
+    aio->offset = 0;
+    aio->execute = do_read;
+    do_post(iomp, aio);
 }
 
 void* do_work(void* arg) {
@@ -216,16 +202,41 @@ void* do_work(void* arg) {
         IOMP_LOG("iomp_evlist_new fail: %s", strerror(errno));
         return NULL;
     }
+    int stop = 0;
     pthread_mutex_lock(&iomp->lock);
-    while (!iomp->stop) {
-        do_wait(iomp, evs);
+    while (!stop) {
+        while (STAILQ_EMPTY(&iomp->jobs)) {
+            do_wait(iomp, evs);
+        }
+        iomp_aio_t aio = STAILQ_FIRST(&iomp->jobs);
+        STAILQ_REMOVE_HEAD(&iomp->jobs, entries);
+        pthread_mutex_unlock(&iomp->lock);
+        aio->execute(iomp, aio);
+        if (aio == &iomp->stop) {
+            stop = 1;
+        }
+        pthread_mutex_lock(&iomp->lock);
     }
-    if (iomp->blocked) {
-        do_interrupt(iomp);
+    if (iomp->nthreads == 0) {
+        iomp_aio_t aio = NULL;
+        while (!STAILQ_EMPTY(&iomp->jobs)) {
+            aio = STAILQ_FIRST(&iomp->jobs);
+            STAILQ_REMOVE_HEAD(&iomp->jobs, entries);
+            IOMP_COMPLETE(aio, -1);
+        }
     }
     pthread_mutex_unlock(&iomp->lock);
     iomp_evlist_drop(evs);
     return NULL;
+}
+
+void do_post(iomp_t iomp, iomp_aio_t aio) {
+    pthread_mutex_lock(&iomp->lock);
+    STAILQ_INSERT_TAIL(&iomp->jobs, aio, entries);
+    if (iomp->blocked == iomp->nthreads) {
+        do_interrupt(iomp);
+    }
+    pthread_mutex_unlock(&iomp->lock);
 }
 
 void do_wait(iomp_t iomp, iomp_evlist_t evs) {
@@ -243,30 +254,79 @@ void do_wait(iomp_t iomp, iomp_evlist_t evs) {
                 iomp_aio_t aio = (iomp_aio_t)ev.udata;
                 ssize_t len = read(aio->fildes, aio->buf, aio->nbytes);
                 if (len == aio->nbytes) {
-                    IOMP_COMPLETE(aio, 1, 0);
+                    IOMP_COMPLETE(aio, 0);
                 } else {
-                    IOMP_COMPLETE(aio, 0, (len == -1 ? errno : 0));
+                    IOMP_COMPLETE(aio, (len == -1 ? errno : -1));
                 }
             }
         }
     }
     pthread_mutex_lock(&iomp->lock);
     iomp->blocked--;
-    if (rv != 0) {
-        do_stop_withlock(iomp);
-    }
 }
 
-void do_stop_withlock(iomp_t iomp) {
-    IOMP_LOG("begin stop [blocked=%zu]", (size_t)iomp->blocked);
-    iomp->stop = 1;
-    if (iomp->blocked) {
-        do_interrupt(iomp);
+void do_stop(iomp_t iomp, iomp_aio_t aio) {
+    pthread_mutex_lock(&iomp->lock);
+    if (--iomp->nthreads > 0) {
+        STAILQ_INSERT_TAIL(&iomp->jobs, aio, entries);
+        if (iomp->blocked == iomp->nthreads) {
+            do_interrupt(iomp);
+        }
     }
+    pthread_mutex_unlock(&iomp->lock);
 }
 
 void do_interrupt(iomp_t iomp) {
     int data = 0;
     write(iomp->intr[1], &data, sizeof(data));
+}
+
+void do_read(iomp_t iomp, iomp_aio_t aio) {
+    size_t offset = 0;
+    while (offset < aio->nbytes) {
+        ssize_t len = read(
+                aio->fildes,
+                aio->buf + offset,
+                aio->nbytes - offset
+        );
+        if (len == -1) {
+            if (errno == EAGAIN) {
+                aio->offset = offset;
+                aio->execute = do_read;
+                struct iomp_event ev;
+                IOMP_EVENT_SET(
+                    &ev,
+                    aio->fildes,
+                    IOMP_EVENT_READ | IOMP_EVENT_ONCE,
+                    aio->nbytes - offset,
+                    aio
+                );
+                if (iomp_queue_post(iomp->queue, &ev) == -1) {
+                    IOMP_COMPLETE(aio, errno);
+                    return;
+                }
+            } else {
+                IOMP_COMPLETE(aio, errno);
+                return;
+            }
+        } else if (len == 0) {
+            IOMP_COMPLETE(aio, -1);
+            return;
+        } else {
+            offset += len;
+        }
+    }
+    IOMP_COMPLETE(aio, 0);
+#if 0
+    int val = fcntl(aio->fildes, F_GETFL, 0);
+    if (val == -1) {
+        IOMP_COMPLETE(aio, errno);
+        return;
+    }
+    if (fcntl(aio->fildes, F_SETFL, val | O_NONBLOCK) == -1) {
+        IOMP_COMPLETE(aio, errno);
+        return;
+    }
+#endif
 }
 
