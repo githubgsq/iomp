@@ -6,10 +6,10 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <pthread.h>
-#include <sys/event.h>
-#include <sys/time.h>
 #include <sys/types.h>
 #include <sys/sysctl.h>
+#include "iomp_atomic.h"
+#include "iomp_event.h"
 #include "iomp.h"
 
 #define IOMP_LOG(fmt, ...) \
@@ -18,19 +18,27 @@
 
 #define IOMP_EVENT_LIMIT 1024
 
+#define IOMP_COMPLETE(aio, succ, err) \
+    do { \
+        (aio)->error = (err); \
+        (aio)->complete((aio), (succ)); \
+        if (iomp_release(&(aio)->refcnt) == 0) { \
+            (aio)->release((aio)); \
+        } \
+    } while (0)
+
 struct iomp_core {
     pthread_mutex_t lock;
     pthread_t* threads;
     int nthread;
-    int eventfd;
-    struct kevent events[IOMP_EVENT_LIMIT];
+    iomp_queue_t queue;
     uint64_t blocked;
     int intr[2];
     unsigned stop:1;
 };
 
 static void* do_work(void* arg);
-static void do_wait(iomp_t iomp, struct timespec* timeout);
+static void do_wait(iomp_t iomp, iomp_evlist_t evs);
 static void do_stop_withlock(iomp_t iomp);
 static void do_interrupt(iomp_t iomp);
 
@@ -42,28 +50,28 @@ iomp_t iomp_new(int nthread) {
     }
     iomp->blocked = 0;
     iomp->stop = 0;
-    iomp->eventfd = kqueue();
-    if (iomp->eventfd == -1) {
-        IOMP_LOG("kqueue fail: %s", strerror(errno));
+    iomp->queue = iomp_queue_new();
+    if (!iomp->queue) {
+        IOMP_LOG("iomp_queue_new fail: %s", strerror(errno));
         free(iomp);
         return NULL;
     }
     int rv = pipe(iomp->intr);
     if (rv != 0) {
         IOMP_LOG("pipe fail: %s", strerror(errno));
-        close(iomp->eventfd);
+        iomp_queue_drop(iomp->queue);
         free(iomp);
         return NULL;
     }
     fcntl(iomp->intr[0], F_SETFL, fcntl(iomp->intr[0], F_GETFL, 0) | O_NONBLOCK);
     fcntl(iomp->intr[1], F_SETFL, fcntl(iomp->intr[1], F_GETFL, 0) | O_NONBLOCK);
-    struct kevent ev;
-    EV_SET(&ev, iomp->intr[0], EVFILT_READ, EV_ADD | EV_CLEAR, 0, 0, iomp);
-    if (kevent(iomp->eventfd, &ev, 1, NULL, 0, NULL) == -1) {
-        IOMP_LOG("kevent fail: %s", strerror(errno));
+    struct iomp_event ev;
+    IOMP_EVENT_SET(&ev, iomp->intr[0], IOMP_EVENT_READ | IOMP_EVENT_EDGE, 0, iomp);
+    if (iomp_queue_post(iomp->queue, &ev) == -1) {
+        IOMP_LOG("iomp_queue_post fail: %s", strerror(errno));
         close(iomp->intr[1]);
         close(iomp->intr[0]);
-        close(iomp->eventfd);
+        iomp_queue_drop(iomp->queue);
         free(iomp);
         return NULL;
     }
@@ -72,12 +80,13 @@ iomp_t iomp_new(int nthread) {
         IOMP_LOG("pthread_mutex_init fail: %s", strerror(rv));
         close(iomp->intr[1]);
         close(iomp->intr[0]);
-        close(iomp->eventfd);
+        iomp_queue_drop(iomp->queue);
         free(iomp);
         return NULL;
     }
     pthread_mutex_lock(&iomp->lock);
     if (nthread <= 0) {
+#if defined(__APPLE__) || defined(__DragonFly__) || defined(__FreeBSD__) || defined(__OpenBSD__)
         int mib[2] = { CTL_HW, HW_NCPU };
         int ncpu = 0;
         size_t len = sizeof(ncpu);
@@ -86,11 +95,29 @@ iomp_t iomp_new(int nthread) {
             IOMP_LOG("sysctlbyname fail: %s", strerror(rv));
             close(iomp->intr[1]);
             close(iomp->intr[0]);
-            close(iomp->eventfd);
+            iomp_queue_drop(iomp->queue);
             free(iomp);
             return NULL;
         }
         nthread = ncpu;
+#elif defined(__linux__)
+        nthread = sysconf(_SC_NPROCESSORS_ONLN);
+        if (nthread == -1) {
+            IOMP_LOG("sysconf fail: %s", strerror(rv));
+            close(iomp->intr[1]);
+            close(iomp->intr[0]);
+            iomp_queue_drop(iomp->queue);
+            free(iomp);
+            return NULL;
+        }
+#else
+        IOMP_LOG("require positive nthread");
+        close(iomp->intr[1]);
+        close(iomp->intr[0]);
+        iomp_queue_drop(iomp->queue);
+        free(iomp);
+        return NULL;
+#endif
     }
     iomp->nthread = 0;
     iomp->threads = (pthread_t*)malloc(sizeof(*iomp->threads) * nthread);
@@ -99,7 +126,7 @@ iomp_t iomp_new(int nthread) {
         pthread_mutex_destroy(&iomp->lock);
         close(iomp->intr[1]);
         close(iomp->intr[0]);
-        close(iomp->eventfd);
+        iomp_queue_drop(iomp->queue);
         free(iomp);
         return NULL;
     }
@@ -129,7 +156,7 @@ void iomp_drop(iomp_t iomp) {
     pthread_mutex_destroy(&iomp->lock);
     close(iomp->intr[1]);
     close(iomp->intr[0]);
-    close(iomp->eventfd);
+    iomp_queue_drop(iomp->queue);
     free(iomp);
 }
 
@@ -151,79 +178,81 @@ int iomp_signal(iomp_t iomp, const iomp_signal_t sig) {
 }
 #endif
 
-void iomp_read(iomp_t iomp, const iomp_aio_t aio) {
-    if (!aio || !aio->complete) {
-        IOMP_LOG("invalid argument");
-        return;
+int iomp_read(iomp_t iomp, iomp_aio_t aio) {
+    if (!aio || !aio->complete || !aio->release) {
+        errno = EINVAL;
+        return -1;
     }
+    iomp_addref(&aio->refcnt);
     if (!iomp) {
-        aio->error = EINVAL;
-        aio->complete(aio, 0);
-        return;
+        IOMP_COMPLETE(aio, 0, EINVAL);
+        return 0;
     }
+#if 0
     int val = fcntl(aio->fildes, F_GETFL, 0);
     if (val == -1) {
-        aio->error = errno;
-        aio->complete(aio, 0);
-        return;
+        IOMP_COMPLETE(aio, 0, errno);
+        return 0;
     }
     if (fcntl(aio->fildes, F_SETFL, val | O_NONBLOCK) == -1) {
-        aio->error = errno;
-        aio->complete(aio, 0);
-        return;
+        IOMP_COMPLETE(aio, 0, errno);
+        return 0;
     }
-    struct kevent ev;
-    EV_SET(&ev,
-            aio->fildes, EVFILT_READ, EV_ADD | EV_ONESHOT, 0, aio->nbytes, aio);
-    if (kevent(iomp->eventfd, &ev, 1, NULL, 0, NULL) == -1) {
-        aio->error = errno;
-        aio->complete(aio, 0);
-        return;
+#endif
+    struct iomp_event ev;
+    IOMP_EVENT_SET(&ev,
+            aio->fildes, IOMP_EVENT_READ | IOMP_EVENT_ONCE, aio->nbytes, aio);
+    if (iomp_queue_post(iomp->queue, &ev) == -1) {
+        IOMP_COMPLETE(aio, 0, errno);
+        return 0;
     }
+    return 0;
 }
 
 void* do_work(void* arg) {
     iomp_t iomp = (iomp_t)arg;
+    iomp_evlist_t evs = iomp_evlist_new(128);
+    if (!evs) {
+        IOMP_LOG("iomp_evlist_new fail: %s", strerror(errno));
+        return NULL;
+    }
     pthread_mutex_lock(&iomp->lock);
     while (!iomp->stop) {
-        do_wait(iomp, NULL);
+        do_wait(iomp, evs);
     }
     if (iomp->blocked) {
         do_interrupt(iomp);
     }
     pthread_mutex_unlock(&iomp->lock);
+    iomp_evlist_drop(evs);
     return NULL;
 }
 
-void do_wait(iomp_t iomp, struct timespec* timeout) {
+void do_wait(iomp_t iomp, iomp_evlist_t evs) {
     iomp->blocked++;
     pthread_mutex_unlock(&iomp->lock);
-    int nevent = kevent(iomp->eventfd,
-            NULL, 0, iomp->events, IOMP_EVENT_LIMIT, timeout);
-    for (int i = 0; i < nevent; i++) {
-        struct kevent* ev = iomp->events + i;
-        /*if (ev->filter == EVFILT_SIGNAL) {
-            iomp_signal_t sig = (iomp_signal_t)ev->udata;
-            sig->ready(sig, ev->data);
-        } else */
-        if (ev->ident == iomp->intr[0]) {
-            int buf = 0;
-            read(iomp->intr[0], &buf, sizeof(buf));
-            IOMP_LOG("interrupted");
-        } else if (ev->filter == EVFILT_READ) {
-            iomp_aio_t aio = (iomp_aio_t)ev->udata;
-            ssize_t len = read(aio->fildes, aio->buf, aio->nbytes);
-            if (len == aio->nbytes) {
-                aio->complete(aio, 1);
-            } else {
-                aio->error = (len == -1 ? errno : 0);
-                aio->complete(aio, 0);
+    int rv = iomp_queue_wait(iomp->queue, evs, -1);
+    if (rv == 0) {
+        struct iomp_event ev;
+        while (iomp_evlist_next(evs, &ev)) {
+            if (ev.udata == iomp) {
+                int buf = 0;
+                read(iomp->intr[0], &buf, sizeof(buf));
+                IOMP_LOG("interrupted");
+            } else if (ev.flags & IOMP_EVENT_READ) {
+                iomp_aio_t aio = (iomp_aio_t)ev.udata;
+                ssize_t len = read(aio->fildes, aio->buf, aio->nbytes);
+                if (len == aio->nbytes) {
+                    IOMP_COMPLETE(aio, 1, 0);
+                } else {
+                    IOMP_COMPLETE(aio, 0, (len == -1 ? errno : 0));
+                }
             }
         }
     }
     pthread_mutex_lock(&iomp->lock);
     iomp->blocked--;
-    if (nevent < 0) {
+    if (rv != 0) {
         do_stop_withlock(iomp);
     }
 }

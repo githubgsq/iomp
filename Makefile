@@ -3,7 +3,7 @@ LIB=libiomp.a
 CC=cc
 CFLAGS=-std=c99 -g -Wall -pipe -fPIC -fvisibility=hidden
 CXX=c++
-CXXFLAGS=-std=c++14 -g -Wall -pipe -fPIC -fvisibility=hidden
+CXXFLAGS=-std=c++11 -g -Wall -pipe -fPIC -fvisibility=hidden
 AR=ar
 ARFLAGS=rc
 LD=c++
@@ -13,17 +13,20 @@ all: $(LIB) test
 
 .PHONY: clean
 clean:
-	rm -f $(LIB) iomp.o test test.o
+	rm -f $(LIB) iomp.o iomp_event.o iomp_epoll.o test test.o
 
 rebuild: clean all
 
-$(LIB): iomp.o
-	$(AR) $(ARFLAGS) $@ iomp.o
+$(LIB): iomp.o iomp_event.o iomp_epoll.o
+	$(AR) $(ARFLAGS) $@ iomp.o iomp_event.o iomp_epoll.o
 
 test: test.o $(LIB)
 	$(LD) -o $@ test.o -L. -liomp $(LDFLAGS)
 
 iomp.o: iomp.c
+	$(CC) -c $(CFLAGS) -o $@ $<
+
+iomp_event.o: iomp_event.c
 	$(CC) -c $(CFLAGS) -o $@ $<
 
 test.o: test.cc

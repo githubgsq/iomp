@@ -5,6 +5,7 @@
 #include <signal.h>
 #include <atomic>
 #include <vector>
+#include <functional>
 #include <fcntl.h>
 #include <thread>
 #include <unistd.h>
@@ -13,35 +14,78 @@
 
 static bool g_loop = true;
 
-static void do_client(int sock, std::atomic<uint64_t>& count) noexcept;
-
-class ScopedFd {
+class SocketPair {
 public:
-    inline ScopedFd() noexcept: _fd(-1) { }
-    inline explicit ScopedFd(int fd) noexcept: _fd(fd) { }
-    inline ~ScopedFd() noexcept {
-        this->close();
+    inline SocketPair() noexcept: _sv{ -1, -1 } {
+        socketpair(AF_LOCAL, SOCK_STREAM, 0, _sv);
     }
-    inline ScopedFd(ScopedFd&& rhs) noexcept: _fd(rhs._fd) {
-        rhs._fd = -1;
+    inline ~SocketPair() noexcept {
+        close(_sv[0]);
+        close(_sv[1]);
     }
-    inline ScopedFd& operator=(ScopedFd&& rhs) noexcept {
-        _fd = rhs._fd;
-        rhs._fd = -1;
+    inline SocketPair(SocketPair&& rhs) noexcept {
+        _sv[0] = rhs._sv[0];
+        rhs._sv[0] = -1;
+        _sv[1] = rhs._sv[1];
+        rhs._sv[1] = -1;
+    }
+    inline SocketPair& operator=(SocketPair&& rhs) noexcept {
+        _sv[0] = rhs._sv[0];
+        rhs._sv[0] = -1;
+        _sv[1] = rhs._sv[1];
+        rhs._sv[1] = -1;
         return *this;
     }
 public:
-    inline explicit operator bool() noexcept { return _fd != -1; }
-    inline operator int() noexcept { return _fd; }
-    inline void close() noexcept {
-        if (_fd != -1) {
-            fprintf(stderr, "close %d\n", _fd);
-            ::close(_fd);
+    inline explicit operator bool() noexcept { return _sv[0] != -1; }
+    inline int server() noexcept { return _sv[0]; }
+    inline int client() noexcept { return _sv[1]; }
+private:
+    int _sv[2];
+};
+
+class Session {
+public:
+    inline Session(::iomp::IOMultiPlexer& iomp, std::atomic<uint64_t>& count) noexcept:
+            _client(&Session::do_client, _sv.client(), std::ref(count)) {
+        auto buf = new uint64_t(0);
+        iomp.read(_sv.server(), buf, sizeof(*buf), [&iomp](::iomp::AsyncIO& aio, bool succ) {
+            Session::do_server(iomp, aio, succ);
+        });
+    }
+    inline ~Session() noexcept {
+        _client.join();
+    }
+public:
+    inline void stop() noexcept {
+        shutdown(_sv.server(), SHUT_RDWR);
+    }
+    static void do_server(::iomp::IOMultiPlexer& iomp, ::iomp::AsyncIO& aio, bool succ) noexcept {
+        if (succ) {
+            //fprintf(stderr, "got 0x%lx\n", *reinterpret_cast<uint64_t*>(aio.buf));
+            iomp.read(aio);
+        } else {
+            if (aio.error != 0) {
+                fprintf(stderr, "read fail: %s\n", strerror(aio.error));
+            }
+            delete reinterpret_cast<uint64_t*>(aio.buf);
         }
-        _fd = -1;
+    }
+    static void do_client(int sock, std::atomic<uint64_t>& count) {
+        uint64_t data = 0xdeadbeeffacebabe;
+        while (1) {
+            auto len = write(sock, &data, sizeof(data));
+            if (len != sizeof(data)) {
+                fprintf(stderr, "write fail: %s\n", strerror(errno));
+                break;
+            }
+            data++;
+            count++;
+        }
     }
 private:
-    int _fd;
+    SocketPair _sv;
+    std::thread _client;
 };
 
 int main(int argc, char* argv[]) {
@@ -49,61 +93,20 @@ int main(int argc, char* argv[]) {
     signal(SIGINT, [](int sig) noexcept {
         g_loop = false;
     });
+    ::iomp::IOMultiPlexer iomp { 1 };
     std::atomic<uint64_t> count { 0 };
-    ScopedFd sv[2];
-    if (socketpair(AF_LOCAL, SOCK_STREAM, 0, reinterpret_cast<int*>(sv)) != 0) {
-        fprintf(stderr, "socketpair fail: %s", strerror(errno));
-        return -1;
+    std::vector<std::unique_ptr<Session>> sess;
+    for (int i = 0; i < 2; i++) {
+        sess.emplace_back(std::unique_ptr<Session>(new Session(iomp, count)));
     }
-
-    std::vector<std::thread> cs;
-    cs.emplace_back(do_client, (int)sv[1], std::ref(count));
-    cs.emplace_back(do_client, (int)sv[1], std::ref(count));
-    cs.emplace_back(do_client, (int)sv[1], std::ref(count));
-    cs.emplace_back(do_client, (int)sv[1], std::ref(count));
-    cs.emplace_back(do_client, (int)sv[1], std::ref(count));
-    cs.emplace_back(do_client, (int)sv[1], std::ref(count));
-    cs.emplace_back(do_client, (int)sv[1], std::ref(count));
-    cs.emplace_back(do_client, (int)sv[1], std::ref(count));
-
-    ::iomp::IOMultiPlexer iomp;
-    uint64_t buf = 0;
-    iomp.read({
-        sv[0], &buf, sizeof(buf),
-        [&iomp](auto aio, auto succ) noexcept {
-            if (succ) {
-                iomp.read(aio);
-            } else {
-                fprintf(stderr, "read fail: %s\n",
-                        aio->error == 0 ? "eof" : strerror(aio->error));
-                shutdown(aio->fildes, SHUT_RDWR);
-            }
-        }
-    });
-
     while (g_loop) {
         sleep(1);
         auto qps = count.exchange(0);
         fprintf(stderr, "%zu qps(s)\n", (size_t)qps);
     }
-    sv[1].close();
-    for (auto& c: cs) {
-        c.join();
+    for (auto& s: sess) {
+        s->stop();
     }
-}
-
-void do_client(int sock, std::atomic<uint64_t>& count) noexcept {
-    uint64_t data = 0xdeadc00dfacebabe;
-    while (1) {
-        auto len = write(sock, &data, sizeof(data));
-        if (len != sizeof(data)) {
-            fprintf(stderr, "write fail: %s\n", strerror(errno));
-            break;
-        }
-        data++;
-        count++;
-        //struct timespec to { 0, 50000 };
-        //nanosleep(&to, nullptr);
-    }
+    return 0;
 }
 
