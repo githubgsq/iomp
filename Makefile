@@ -29,6 +29,9 @@ iomp.o: iomp.c
 iomp_kqueue.o: iomp_kqueue.c
 	$(CC) -c $(CFLAGS) -o $@ $<
 
+iomp_epoll.o: iomp_epoll.c
+	$(CC) -c $(CFLAGS) -o $@ $<
+
 test.o: test.cc
 	$(CXX) -c $(CXXFLAGS) -o $@ $<
 

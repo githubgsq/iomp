@@ -84,12 +84,13 @@ int iomp_evlist_next(iomp_evlist_t evs, iomp_event_t ev) {
 }
 
 
-int iomp_queue_post(iomp_queue_t q, iomp_event_t ev) {
+int iomp_queue_add(iomp_queue_t q, iomp_event_t ev) {
     if (!q || !ev) {
         errno = EINVAL;
         return -1;
     }
     struct epoll_event epev;
+#if 0
     if (ev->lowat > 0) {
         int rv = setsockopt(
             ev->ident, SOL_SOCKET, SO_RCVLOWAT,
@@ -98,6 +99,7 @@ int iomp_queue_post(iomp_queue_t q, iomp_event_t ev) {
             return -1;
         }
     }
+#endif
     epev.events = 0;
     if (ev->flags & IOMP_EVENT_READ) {
         epev.events |= EPOLLIN;
@@ -117,6 +119,22 @@ int iomp_queue_post(iomp_queue_t q, iomp_event_t ev) {
         rv = epoll_ctl(q->epfd, EPOLL_CTL_MOD, ev->ident, &epev);
     }
     return rv;
+}
+
+int iomp_queue_del(iomp_queue_t q, iomp_event_t ev) {
+    if (!q || !ev) {
+        errno = EINVAL;
+        return -1;
+    }
+    struct epoll_event epev;
+    epev.events = 0;
+    if (ev->flags & IOMP_EVENT_READ) {
+        epev.events |= EPOLLIN;
+    }
+    if (ev->flags & IOMP_EVENT_WRITE) {
+        epev.events |= EPOLLOUT;
+    }
+    return epoll_ctl(q->epfd, EPOLL_CTL_DEL, ev->ident, &epev);
 }
 
 int iomp_queue_wait(iomp_queue_t q, iomp_evlist_t evs, int timeout) {

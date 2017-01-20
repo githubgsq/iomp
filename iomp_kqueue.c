@@ -84,7 +84,7 @@ int iomp_evlist_next(iomp_evlist_t evs, iomp_event_t ev) {
 }
 
 
-int iomp_queue_post(iomp_queue_t q, iomp_event_t ev) {
+int iomp_queue_add(iomp_queue_t q, iomp_event_t ev) {
     if (!q || !ev) {
         errno = EINVAL;
         return -1;
@@ -103,7 +103,24 @@ int iomp_queue_post(iomp_queue_t q, iomp_event_t ev) {
     if (ev->flags & IOMP_EVENT_ONCE) {
         flags |= EV_ONESHOT;
     }
-    EV_SET(&kqev, ev->ident, filter, flags, 0, ev->lowat, ev->udata);
+    EV_SET(&kqev, ev->ident, filter, flags,
+            ev->lowat > 0 ? NOTE_LOWAT : 0, ev->lowat, ev->udata);
+    return kevent(q->kqfd, &kqev, 1, NULL, 0, NULL);
+}
+
+int iomp_queue_del(iomp_queue_t q, iomp_event_t ev) {
+    if (!q || !ev) {
+        errno = EINVAL;
+        return -1;
+    }
+    struct kevent kqev;
+    int16_t filter = 0;
+    if (ev->flags & IOMP_EVENT_READ) {
+        filter = EVFILT_READ;
+    } else if (ev->flags & IOMP_EVENT_WRITE) {
+        filter = EVFILT_WRITE;
+    }
+    EV_SET(&kqev, ev->ident, filter, EV_DELETE, 0, 0, NULL);
     return kevent(q->kqfd, &kqev, 1, NULL, 0, NULL);
 }
 
@@ -112,7 +129,7 @@ int iomp_queue_wait(iomp_queue_t q, iomp_evlist_t evs, int timeout) {
         errno = EINVAL;
         return -1;
     }
-    struct timespec ts = { timeout / 1000, (timeout % 1000) * 1000 };
+    struct timespec ts = { timeout / 1000, (timeout % 1000) * 1000000 };
     int rv = kevent(q->kqfd, NULL, 0, evs->evs, evs->nevents,
             timeout >= 0 ? &ts : NULL);
     if (rv == -1) {

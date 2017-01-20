@@ -14,52 +14,38 @@
 
 static bool g_loop = true;
 
-class SocketPair {
-public:
-    inline SocketPair() noexcept: _sv{ -1, -1 } {
-        socketpair(AF_LOCAL, SOCK_STREAM, 0, _sv);
-    }
-    inline ~SocketPair() noexcept {
-        close(_sv[0]);
-        close(_sv[1]);
-    }
-    inline SocketPair(SocketPair&& rhs) noexcept {
-        _sv[0] = rhs._sv[0];
-        rhs._sv[0] = -1;
-        _sv[1] = rhs._sv[1];
-        rhs._sv[1] = -1;
-    }
-    inline SocketPair& operator=(SocketPair&& rhs) noexcept {
-        _sv[0] = rhs._sv[0];
-        rhs._sv[0] = -1;
-        _sv[1] = rhs._sv[1];
-        rhs._sv[1] = -1;
-        return *this;
-    }
-public:
-    inline explicit operator bool() noexcept { return _sv[0] != -1; }
-    inline int server() noexcept { return _sv[0]; }
-    inline int client() noexcept { return _sv[1]; }
-private:
-    int _sv[2];
-};
-
 class Session {
 public:
+#if 0
+    class Data {
+    public:
+        inline explicit Data(unsigned int val) noexcept: _val(val) {
+            _data[0] = 0;
+        }
+        inline operator unsigned int() noexcept { return _val; }
+        inline int operator++() noexcept { return _val++; }
+        inline int operator++(int) noexcept { return ++_val; }
+    private:
+        unsigned int _val;
+        uint64_t _data[100];
+    };
+#else
+    typedef unsigned int Data;
+#endif
     inline Session(::iomp::IOMultiPlexer& iomp, std::atomic<uint64_t>& count) noexcept/*:
             _client(&Session::do_client, _sv.client(), std::ref(count))*/ {
         int sv[2] = { -1, -1 };
-        if (socketpair(AF_LOCAL, SOCK_STREAM | SOCK_NONBLOCK, 0, sv) != 0) {
+        if (socketpair(AF_LOCAL, SOCK_STREAM, 0, sv) != 0) {
             fprintf(stderr, "socketpair fail: %s\n", strerror(errno));
             return;
         }
         fcntl(sv[0], F_SETFL, fcntl(sv[0], F_GETFL, 0) | O_NONBLOCK);
         fcntl(sv[1], F_SETFL, fcntl(sv[1], F_GETFL, 0) | O_NONBLOCK);
-        /*auto buf = new uint64_t(0);
+        auto buf = new Data(0);
         iomp.read(sv[0], buf, sizeof(*buf), [&iomp](::iomp::AsyncIO& aio, int error) {
             Session::do_server(iomp, aio, error);
-        });*/
-        auto buf2 = new uint64_t(0xdeadbeedfacebabe);
+        });
+        auto buf2 = new Data(0xdeadc00d);
         iomp.write(sv[1], buf2, sizeof(*buf2), [&iomp, &count](::iomp::AsyncIO& aio, int error) {
             Session::do_client(iomp, aio, error, count);
         });
@@ -70,7 +56,9 @@ public:
 public:
     static void do_server(::iomp::IOMultiPlexer& iomp, ::iomp::AsyncIO& aio, int error) noexcept {
         if (error == 0) {
-            fprintf(stderr, "recv 0x%lx\n", *reinterpret_cast<uint64_t*>(aio.buf));
+            //fprintf(stderr, "recv 0x%x\n", *reinterpret_cast<unsigned int*>(aio.buf));
+            //struct timespec ts = { 0, 1000000 };
+            //nanosleep(&ts, nullptr);
             iomp.read(aio);
         } else {
             if (error > 0) {
@@ -78,7 +66,7 @@ public:
             } else {
                 fprintf(stderr, "read end\n");
             }
-            delete reinterpret_cast<uint64_t*>(aio.buf);
+            delete reinterpret_cast<Data*>(aio.buf);
             close(aio);
             //shutdown(aio, SHUT_RDWR);
         }
@@ -86,10 +74,12 @@ public:
     static void do_client(::iomp::IOMultiPlexer& iomp, ::iomp::AsyncIO& aio, int error,
             std::atomic<uint64_t>& count) noexcept {
         if (error == 0) {
-            auto& data = *reinterpret_cast<uint64_t*>(aio.buf);
-            fprintf(stderr, "send 0x%lx\n", data);
+            auto& data = *reinterpret_cast<Data*>(aio.buf);
+            //fprintf(stderr, "send 0x%x\n", data);
             data++;
             count++;
+            //struct timespec ts = { 0, 1000000 };
+            //nanosleep(&ts, nullptr);
             iomp.write(aio);
         } else {
             if (error > 0) {
@@ -97,7 +87,7 @@ public:
             } else {
                 fprintf(stderr, "write end\n");
             }
-            delete reinterpret_cast<uint64_t*>(aio.buf);
+            delete reinterpret_cast<Data*>(aio.buf);
             close(aio);
             //shutdown(aio, SHUT_RDWR);
         }
@@ -129,7 +119,7 @@ int main(int argc, char* argv[]) {
     std::atomic<uint64_t> count { 0 };
     std::vector<std::unique_ptr<Session>> sess;
     ::iomp::IOMultiPlexer iomp { 1 };
-    for (int i = 0; i < 1; i++) {
+    for (int i = 0; i < 4; i++) {
         sess.emplace_back(std::unique_ptr<Session>(new Session(iomp, count)));
     }
     //while (g_loop) {
