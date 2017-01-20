@@ -18,8 +18,10 @@ static bool g_loop = true;
 class Session {
 public:
     typedef struct { uint8_t x[1024]; } Data;
-    inline Session(::iomp::IOMultiPlexer& iomp, std::atomic<uint64_t>& rcnt, std::atomic<uint64_t>& wcnt) noexcept:
-            _iomp(iomp), _rcnt(rcnt), _wcnt(wcnt), _delay({0, 100000000}) {
+    inline Session(::iomp::IOMultiPlexer& iomp,
+                std::atomic<uint64_t>& rcnt,
+                std::atomic<uint64_t>& wcnt) noexcept:
+            _iomp(iomp), _rcnt(rcnt), _wcnt(wcnt) {
         int sv[2] = { -1, -1 };
         if (socketpair(AF_LOCAL, SOCK_STREAM, 0, sv) != 0) {
             fprintf(stderr, "socketpair fail: %s\n", strerror(errno));
@@ -117,7 +119,6 @@ private:
     std::atomic<uint64_t>& _wcnt;
     Data _rbuf;
     Data _wbuf;
-    struct timespec _delay;
 };
 
 int main(int argc, char* argv[]) {
@@ -129,7 +130,7 @@ int main(int argc, char* argv[]) {
     std::atomic<uint64_t> wcnt { 0 };
     std::vector<std::unique_ptr<Session>> sess;
     //::iomp_loglevel(IOMP_LOGLEVEL_DEBUG);
-    ::iomp::IOMultiPlexer iomp { 1 };
+    ::iomp::IOMultiPlexer iomp { 2 };
     for (int i = 0; i < 1; i++) {
         sess.emplace_back(std::unique_ptr<Session>(new Session(iomp, rcnt, wcnt)));
     }

@@ -316,7 +316,7 @@ void do_read(iomp_t iomp, iomp_aio_t aio) {
             IOMP_EVENT_SET(
                 &ev,
                 aio->fildes,
-                IOMP_EVENT_READ | IOMP_EVENT_EDGE,
+                IOMP_EVENT_READ | IOMP_EVENT_ONCE,
                 todo,
                 aio
             );
@@ -342,18 +342,16 @@ void on_read(iomp_t iomp, iomp_event_t ev) {
                 aio->fildes, aio->buf, aio->offset, aio->nbytes, aio->offset,
                 len, len == -1 ? strerror(errno) : (len == 0 ? "eof" : "ok"));
         if (len == todo) {
-            int rv = iomp_queue_del(iomp->queue, aio->fildes, IOMP_EVENT_READ);
-            IOMP_LOG(DEBUG, "remove %d from queue -> %d", aio->fildes, rv);
+            //iomp_queue_del(iomp->queue, aio->fildes, IOMP_EVENT_READ);
             IOMP_COMPLETE(aio, 0);
             break;
-        } else if (len > 0) {
-            aio->offset += len;
+        //} else if (len > 0) {
+        //    aio->offset += len;
         } else if (len == -1 && errno == EAGAIN) {
             break;
         } else {
             int err = errno;
-            int rv = iomp_queue_del(iomp->queue, aio->fildes, IOMP_EVENT_READ);
-            IOMP_LOG(DEBUG, "remove %d from queue -> %d", aio->fildes, rv);
+            //iomp_queue_del(iomp->queue, aio->fildes, IOMP_EVENT_READ);
             IOMP_COMPLETE(aio, (len == -1 ? err : -1));
             break;
         }
@@ -368,14 +366,14 @@ void do_write(iomp_t iomp, iomp_aio_t aio) {
             aio->offset += len;
             IOMP_COMPLETE(aio, 0);
             break;
-        } else if (len > 0) {
-            aio->offset += len;
+        //} else if (len > 0) {
+        //    aio->offset += len;
         } else if (len == -1 && errno == EAGAIN) {
             struct iomp_event ev;
             IOMP_EVENT_SET(
                 &ev,
                 aio->fildes,
-                IOMP_EVENT_WRITE | IOMP_EVENT_EDGE,
+                IOMP_EVENT_WRITE | IOMP_EVENT_ONCE,
                 todo,
                 aio
             );
@@ -399,7 +397,7 @@ void on_write(iomp_t iomp, iomp_event_t ev) {
                 aio->fildes, aio->buf, aio->offset, aio->nbytes, aio->offset,
                 len, len == -1 ? strerror(errno) : (len == 0 ? "eof" : "ok"));
         if (len == todo) {
-            iomp_queue_del(iomp->queue, aio->fildes, IOMP_EVENT_WRITE);
+            //iomp_queue_del(iomp->queue, aio->fildes, IOMP_EVENT_WRITE);
             IOMP_COMPLETE(aio, 0);
             break;
         } else if (len > 0) {
@@ -408,7 +406,7 @@ void on_write(iomp_t iomp, iomp_event_t ev) {
             break;
         } else {
             int err = errno;
-            iomp_queue_del(iomp->queue, aio->fildes, IOMP_EVENT_WRITE);
+            //iomp_queue_del(iomp->queue, aio->fildes, IOMP_EVENT_WRITE);
             IOMP_COMPLETE(aio, (len == -1 ? err : -1));
             break;
         }

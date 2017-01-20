@@ -103,24 +103,24 @@ int iomp_queue_add(iomp_queue_t q, iomp_event_t ev) {
     if (ev->flags & IOMP_EVENT_ONCE) {
         flags |= EV_ONESHOT;
     }
-    EV_SET(&kqev, ev->ident, filter, flags,
+    EV_SET(&kqev, ev->ident, filter, EV_ADD | EV_ONESHOT,
             ev->lowat > 0 ? NOTE_LOWAT : 0, ev->lowat, ev->udata);
     return kevent(q->kqfd, &kqev, 1, NULL, 0, NULL);
 }
 
-int iomp_queue_del(iomp_queue_t q, iomp_event_t ev) {
-    if (!q || !ev) {
+int iomp_queue_del(iomp_queue_t q, int ident, uint16_t events) {
+    if (!q) {
         errno = EINVAL;
         return -1;
     }
     struct kevent kqev;
     int16_t filter = 0;
-    if (ev->flags & IOMP_EVENT_READ) {
+    if (events & IOMP_EVENT_READ) {
         filter = EVFILT_READ;
-    } else if (ev->flags & IOMP_EVENT_WRITE) {
+    } else if (events & IOMP_EVENT_WRITE) {
         filter = EVFILT_WRITE;
     }
-    EV_SET(&kqev, ev->ident, filter, EV_DELETE, 0, 0, NULL);
+    EV_SET(&kqev, ident, filter, EV_DELETE, 0, 0, NULL);
     return kevent(q->kqfd, &kqev, 1, NULL, 0, NULL);
 }
 
