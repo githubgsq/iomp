@@ -38,7 +38,7 @@ void iomp_evlist_drop(iomp_evlist_t evs);
 int iomp_evlist_next(iomp_evlist_t evs, iomp_event_t ev);
 
 int iomp_queue_add(iomp_queue_t q, iomp_event_t ev);
-int iomp_queue_del(iomp_queue_t q, iomp_event_t ev);
+int iomp_queue_del(iomp_queue_t q, int fildes, uint16_t event);
 int iomp_queue_wait(iomp_queue_t q, iomp_evlist_t evs, int timeout);
 
 #if defined(__APPLE__) || defined(__DragonFly__) || defined(__FreeBSD__) || defined(__OpenBSD__)

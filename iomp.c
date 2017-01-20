@@ -12,17 +12,11 @@
 #include "iomp_event.h"
 #include "iomp.h"
 
-#define IOMP_LOG(fmt, ...) \
-    fprintf(stderr, "[libiomp] " __FILE__ ":%d " fmt "\n", \
-            __LINE__, ##__VA_ARGS__)
-
 #define IOMP_EVENT_LIMIT 1024
 
 #define IOMP_COMPLETE(aio, err) \
     do { \
-        if (err != 0) { \
-            IOMP_LOG("aio fail: %s", err == -1 ? "eof" : strerror(err)); \
-        } \
+        IOMP_LOG(DEBUG, "aio complete: %d", (err)); \
         (aio)->complete((aio), (err)); \
         if (iomp_release(&(aio)->refcnt) == 0) { \
             (aio)->release((aio)); \
@@ -46,25 +40,27 @@ static void do_wait(iomp_t iomp, iomp_evlist_t evs);
 static void do_stop(iomp_t iomp, iomp_aio_t aio);
 static void do_interrupt(iomp_t iomp);
 static void do_read(iomp_t iomp, iomp_aio_t aio);
+static void on_read(iomp_t iomp, iomp_event_t ev);
 static void do_write(iomp_t iomp, iomp_aio_t aio);
+static void on_write(iomp_t iomp, iomp_event_t ev);
 
 iomp_t iomp_new(int nthreads) {
     iomp_t iomp = (iomp_t)malloc(sizeof(*iomp));
     if (!iomp) {
-        IOMP_LOG("malloc fail: %s", strerror(errno));
+        IOMP_LOG(ERROR, "malloc fail: %s", strerror(errno));
         return NULL;
     }
     STAILQ_INIT(&iomp->jobs);
     iomp->blocked = 0;
     iomp->queue = iomp_queue_new();
     if (!iomp->queue) {
-        IOMP_LOG("iomp_queue_new fail: %s", strerror(errno));
+        IOMP_LOG(ERROR, "iomp_queue_new fail: %s", strerror(errno));
         free(iomp);
         return NULL;
     }
     int rv = pipe(iomp->intr);
     if (rv != 0) {
-        IOMP_LOG("pipe fail: %s", strerror(errno));
+        IOMP_LOG(ERROR, "pipe fail: %s", strerror(errno));
         iomp_queue_drop(iomp->queue);
         free(iomp);
         return NULL;
@@ -74,7 +70,7 @@ iomp_t iomp_new(int nthreads) {
     struct iomp_event ev;
     IOMP_EVENT_SET(&ev, iomp->intr[0], IOMP_EVENT_READ | IOMP_EVENT_EDGE, 0, iomp);
     if (iomp_queue_add(iomp->queue, &ev) == -1) {
-        IOMP_LOG("iomp_queue_post fail: %s", strerror(errno));
+        IOMP_LOG(ERROR, "iomp_queue_post fail: %s", strerror(errno));
         close(iomp->intr[1]);
         close(iomp->intr[0]);
         iomp_queue_drop(iomp->queue);
@@ -83,7 +79,7 @@ iomp_t iomp_new(int nthreads) {
     }
     rv = pthread_mutex_init(&iomp->lock, NULL);
     if (rv != 0) {
-        IOMP_LOG("pthread_mutex_init fail: %s", strerror(rv));
+        IOMP_LOG(ERROR, "pthread_mutex_init fail: %s", strerror(rv));
         close(iomp->intr[1]);
         close(iomp->intr[0]);
         iomp_queue_drop(iomp->queue);
@@ -98,7 +94,7 @@ iomp_t iomp_new(int nthreads) {
         size_t len = sizeof(ncpu);
         rv = sysctl(mib, 2, &ncpu, &len, NULL, 0);
         if (rv != 0) {
-            IOMP_LOG("sysctlbyname fail: %s", strerror(rv));
+            IOMP_LOG(ERROR, "sysctlbyname fail: %s", strerror(rv));
             close(iomp->intr[1]);
             close(iomp->intr[0]);
             iomp_queue_drop(iomp->queue);
@@ -109,7 +105,7 @@ iomp_t iomp_new(int nthreads) {
 #elif defined(__linux__)
         nthreads = sysconf(_SC_NPROCESSORS_ONLN);
         if (nthreads == -1) {
-            IOMP_LOG("sysconf fail: %s", strerror(rv));
+            IOMP_LOG(ERROR, "sysconf fail: %s", strerror(rv));
             close(iomp->intr[1]);
             close(iomp->intr[0]);
             iomp_queue_drop(iomp->queue);
@@ -117,7 +113,7 @@ iomp_t iomp_new(int nthreads) {
             return NULL;
         }
 #else
-        IOMP_LOG("require positive nthreads");
+        IOMP_LOG(ERROR, "require positive nthreads");
         close(iomp->intr[1]);
         close(iomp->intr[0]);
         iomp_queue_drop(iomp->queue);
@@ -130,7 +126,7 @@ iomp_t iomp_new(int nthreads) {
     iomp->stop.execute = do_stop;
     iomp->threads = (pthread_t*)malloc(sizeof(*iomp->threads) * nthreads);
     if (!iomp->threads) {
-        IOMP_LOG("malloc fail: %s", strerror(errno));
+        IOMP_LOG(ERROR, "malloc fail: %s", strerror(errno));
         pthread_mutex_destroy(&iomp->lock);
         close(iomp->intr[1]);
         close(iomp->intr[0]);
@@ -141,7 +137,7 @@ iomp_t iomp_new(int nthreads) {
     for (int i = 0; i < nthreads; i++) {
         rv = pthread_create(iomp->threads + i, NULL, do_work, iomp);
         if (rv != 0) {
-            IOMP_LOG("pthread_create fail: %s", strerror(rv));
+            IOMP_LOG(ERROR, "pthread_create fail: %s", strerror(rv));
         } else {
             iomp->nthreads++;
         }
@@ -186,7 +182,7 @@ int iomp_signal(iomp_t iomp, const iomp_signal_t sig) {
 
 void iomp_read(iomp_t iomp, iomp_aio_t aio) {
     if (!aio || !aio->complete || !aio->release) {
-        IOMP_LOG("invalid argument");
+        IOMP_LOG(ERROR, "invalid argument");
         return;
     }
     iomp_addref(&aio->refcnt);
@@ -201,7 +197,7 @@ void iomp_read(iomp_t iomp, iomp_aio_t aio) {
 
 void iomp_write(iomp_t iomp, iomp_aio_t aio) {
     if (!aio || !aio->complete || !aio->release) {
-        IOMP_LOG("invalid argument");
+        IOMP_LOG(ERROR, "invalid argument");
         return;
     }
     iomp_addref(&aio->refcnt);
@@ -218,7 +214,7 @@ void* do_work(void* arg) {
     iomp_t iomp = (iomp_t)arg;
     iomp_evlist_t evs = iomp_evlist_new(128);
     if (!evs) {
-        IOMP_LOG("iomp_evlist_new fail: %s", strerror(errno));
+        IOMP_LOG(ERROR, "iomp_evlist_new fail: %s", strerror(errno));
         return NULL;
     }
     int stop = 0;
@@ -268,33 +264,13 @@ void do_wait(iomp_t iomp, iomp_evlist_t evs) {
             if (ev.udata == iomp) {
                 int buf = 0;
                 read(iomp->intr[0], &buf, sizeof(buf));
-                //IOMP_LOG("interrupted");
                 continue;
             }
             if (ev.flags & IOMP_EVENT_READ) {
-                iomp_aio_t aio = (iomp_aio_t)ev.udata;
-                size_t todo = aio->nbytes - aio->offset;
-                ssize_t len = read(aio->fildes, aio->buf + aio->offset, todo);
-                if (len == todo) {
-                    IOMP_COMPLETE(aio, 0);
-                } else if (len == -1 && errno == EAGAIN) {
-                    continue;
-                } else {
-                    IOMP_COMPLETE(aio, (len == -1 ? errno : -1));
-                }
+                on_read(iomp, &ev);
             }
             if (ev.flags & IOMP_EVENT_WRITE) {
-                iomp_aio_t aio = (iomp_aio_t)ev.udata;
-                size_t todo = aio->nbytes - aio->offset;
-                ssize_t len = write(aio->fildes, aio->buf + aio->offset, todo);
-                // IOMP_LOG("event write(%d, %p + %zu, %zu - %zu) -> (%zd, %s)", aio->fildes, aio->buf, aio->offset, aio->nbytes, aio->offset, len, (len == todo) ? "ok" : (len == 0 ? "eof" : strerror(errno)));
-                if (len == todo) {
-                    IOMP_COMPLETE(aio, 0);
-                } else if (len == -1 && errno == EAGAIN) {
-                    continue;
-                } else {
-                    IOMP_COMPLETE(aio, (len == -1 ? errno : -1));
-                }
+                on_write(iomp, &ev);
             }
         }
     }
@@ -319,76 +295,123 @@ void do_interrupt(iomp_t iomp) {
 }
 
 void do_read(iomp_t iomp, iomp_aio_t aio) {
-    size_t offset = 0;
-    while (offset < aio->nbytes) {
-        ssize_t len = read(
+    while (1) {
+        size_t todo = aio->nbytes - aio->offset;
+        ssize_t len = read(aio->fildes, aio->buf + aio->offset, todo);
+        int err = errno;
+        IOMP_LOG(DEBUG, "read(%d, %p+%zu, %zu-%zu) -> (%zd, %d)",
                 aio->fildes,
-                aio->buf + offset,
-                aio->nbytes - offset
-        );
-        // IOMP_LOG("read(%d, %p + %zu, %zu - %zu) -> (%zd, %s)", aio->fildes, aio->buf, offset, aio->nbytes, offset, len, strerror(errno));
-        if (len == -1) {
-            if (errno == EAGAIN) {
-                aio->offset = offset;
-                struct iomp_event ev;
-                IOMP_EVENT_SET(
-                    &ev,
-                    aio->fildes,
-                    IOMP_EVENT_READ | IOMP_EVENT_ONCE,
-                    aio->nbytes - offset,
-                    aio
-                );
-                if (iomp_queue_add(iomp->queue, &ev) == -1) {
-                    IOMP_COMPLETE(aio, errno);
-                }
-            } else {
+                aio->buf, aio->offset,
+                aio->nbytes, aio->offset,
+                len, err);
+        errno = err;
+        if (len == todo) {
+            aio->offset += len;
+            IOMP_COMPLETE(aio, 0);
+            break;
+        } else if (len > 0) {
+            aio->offset += len;
+        } else if (len == -1 && errno == EAGAIN) {
+            struct iomp_event ev;
+            IOMP_EVENT_SET(
+                &ev,
+                aio->fildes,
+                IOMP_EVENT_READ | IOMP_EVENT_EDGE,
+                todo,
+                aio
+            );
+            IOMP_LOG(DEBUG, "add to queue %d", ev.ident);
+            if (iomp_queue_add(iomp->queue, &ev) == -1) {
+                IOMP_LOG(WARNING, "add to queue %d fail", ev.ident);
                 IOMP_COMPLETE(aio, errno);
             }
-            return;
-        } else if (len == 0) {
-            IOMP_COMPLETE(aio, -1);
-            return;
+            break;
         } else {
-            offset += len;
+            IOMP_COMPLETE(aio, (len == -1 ? errno : -1));
+            break;
         }
     }
-    IOMP_COMPLETE(aio, 0);
+}
+
+void on_read(iomp_t iomp, iomp_event_t ev) {
+    iomp_aio_t aio = (iomp_aio_t)ev->udata;
+    while (1) {
+        size_t todo = aio->nbytes - aio->offset;
+        ssize_t len = read(aio->fildes, aio->buf + aio->offset, todo);
+        IOMP_LOG(DEBUG, "read(%d, %p + %zu, %zu - %zu) -> (%zd, %s)",
+                aio->fildes, aio->buf, aio->offset, aio->nbytes, aio->offset,
+                len, len == -1 ? strerror(errno) : (len == 0 ? "eof" : "ok"));
+        if (len == todo) {
+            int rv = iomp_queue_del(iomp->queue, aio->fildes, IOMP_EVENT_READ);
+            IOMP_LOG(DEBUG, "remove %d from queue -> %d", aio->fildes, rv);
+            IOMP_COMPLETE(aio, 0);
+            break;
+        } else if (len > 0) {
+            aio->offset += len;
+        } else if (len == -1 && errno == EAGAIN) {
+            break;
+        } else {
+            int err = errno;
+            int rv = iomp_queue_del(iomp->queue, aio->fildes, IOMP_EVENT_READ);
+            IOMP_LOG(DEBUG, "remove %d from queue -> %d", aio->fildes, rv);
+            IOMP_COMPLETE(aio, (len == -1 ? err : -1));
+            break;
+        }
+    }
 }
 
 void do_write(iomp_t iomp, iomp_aio_t aio) {
-    size_t offset = 0;
-    while (offset < aio->nbytes) {
-        ssize_t len = write(
+    while (1) {
+        size_t todo = aio->nbytes - aio->offset;
+        ssize_t len = write(aio->fildes, aio->buf + aio->offset, todo);
+        if (len == todo) {
+            aio->offset += len;
+            IOMP_COMPLETE(aio, 0);
+            break;
+        } else if (len > 0) {
+            aio->offset += len;
+        } else if (len == -1 && errno == EAGAIN) {
+            struct iomp_event ev;
+            IOMP_EVENT_SET(
+                &ev,
                 aio->fildes,
-                aio->buf + offset,
-                aio->nbytes - offset
-        );
-        // IOMP_LOG("write(%d, %p + %zu, %zu - %zu) -> (%zd, %s)", aio->fildes, aio->buf, offset, aio->nbytes, offset, len, (len == aio->nbytes - offset) ? "ok" : (len == 0 ? "eof" : strerror(errno)));
-        if (len == -1) {
-            if (errno == EAGAIN) {
-                aio->offset = offset;
-                struct iomp_event ev;
-                IOMP_EVENT_SET(
-                    &ev,
-                    aio->fildes,
-                    IOMP_EVENT_WRITE | IOMP_EVENT_ONCE,
-                    aio->nbytes - offset,
-                    aio
-                );
-                if (iomp_queue_add(iomp->queue, &ev) == -1) {
-                    IOMP_COMPLETE(aio, errno);
-                }
-            } else {
+                IOMP_EVENT_WRITE | IOMP_EVENT_EDGE,
+                todo,
+                aio
+            );
+            if (iomp_queue_add(iomp->queue, &ev) == -1) {
                 IOMP_COMPLETE(aio, errno);
             }
-            return;
-        } else if (len == 0) {
-            IOMP_COMPLETE(aio, -1);
-            return;
+            break;
         } else {
-            offset += len;
+            IOMP_COMPLETE(aio, (len == -1 ? errno : -1));
+            break;
         }
     }
-    IOMP_COMPLETE(aio, 0);
+}
+
+void on_write(iomp_t iomp, iomp_event_t ev) {
+    iomp_aio_t aio = (iomp_aio_t)ev->udata;
+    while (1) {
+        size_t todo = aio->nbytes - aio->offset;
+        ssize_t len = write(aio->fildes, aio->buf + aio->offset, todo);
+        IOMP_LOG(DEBUG, "write(%d, %p + %zu, %zu - %zu) -> (%zd, %s)",
+                aio->fildes, aio->buf, aio->offset, aio->nbytes, aio->offset,
+                len, len == -1 ? strerror(errno) : (len == 0 ? "eof" : "ok"));
+        if (len == todo) {
+            iomp_queue_del(iomp->queue, aio->fildes, IOMP_EVENT_WRITE);
+            IOMP_COMPLETE(aio, 0);
+            break;
+        } else if (len > 0) {
+            aio->offset += len;
+        } else if (len == -1 && errno == EAGAIN) {
+            break;
+        } else {
+            int err = errno;
+            iomp_queue_del(iomp->queue, aio->fildes, IOMP_EVENT_WRITE);
+            IOMP_COMPLETE(aio, (len == -1 ? err : -1));
+            break;
+        }
+    }
 }
 

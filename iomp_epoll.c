@@ -1,11 +1,13 @@
 #if defined(__linux__)
 
 #include <stdlib.h>
+#include <string.h>
 #include <errno.h>
 #include <unistd.h>
 #include <sys/epoll.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include "iomp.h"
 #include "iomp_event.h"
 
 struct iomp_queue {
@@ -90,16 +92,6 @@ int iomp_queue_add(iomp_queue_t q, iomp_event_t ev) {
         return -1;
     }
     struct epoll_event epev;
-#if 0
-    if (ev->lowat > 0) {
-        int rv = setsockopt(
-            ev->ident, SOL_SOCKET, SO_RCVLOWAT,
-            &ev->lowat, sizeof(ev->lowat));
-        if (rv == -1) {
-            return -1;
-        }
-    }
-#endif
     epev.events = 0;
     if (ev->flags & IOMP_EVENT_READ) {
         epev.events |= EPOLLIN;
@@ -114,27 +106,23 @@ int iomp_queue_add(iomp_queue_t q, iomp_event_t ev) {
         epev.events |= EPOLLONESHOT;
     }
     epev.data.ptr = ev->udata;
-    int rv = epoll_ctl(q->epfd, EPOLL_CTL_ADD, ev->ident, &epev);
-    if (rv == -1 && errno == EEXIST) {
-        rv = epoll_ctl(q->epfd, EPOLL_CTL_MOD, ev->ident, &epev);
-    }
-    return rv;
+    return epoll_ctl(q->epfd, EPOLL_CTL_ADD, ev->ident, &epev);
 }
 
-int iomp_queue_del(iomp_queue_t q, iomp_event_t ev) {
-    if (!q || !ev) {
+int iomp_queue_del(iomp_queue_t q, int fildes, uint16_t events) {
+    if (!q) {
         errno = EINVAL;
         return -1;
     }
     struct epoll_event epev;
     epev.events = 0;
-    if (ev->flags & IOMP_EVENT_READ) {
+    if (events & IOMP_EVENT_READ) {
         epev.events |= EPOLLIN;
     }
-    if (ev->flags & IOMP_EVENT_WRITE) {
+    if (events & IOMP_EVENT_WRITE) {
         epev.events |= EPOLLOUT;
     }
-    return epoll_ctl(q->epfd, EPOLL_CTL_DEL, ev->ident, &epev);
+    return epoll_ctl(q->epfd, EPOLL_CTL_DEL, fildes, &epev);
 }
 
 int iomp_queue_wait(iomp_queue_t q, iomp_evlist_t evs, int timeout) {

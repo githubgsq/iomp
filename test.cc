@@ -4,10 +4,11 @@
 #include <errno.h>
 #include <signal.h>
 #include <atomic>
+#include <memory>
 #include <vector>
+#include <thread>
 #include <functional>
 #include <fcntl.h>
-#include <thread>
 #include <unistd.h>
 #include <sys/socket.h>
 #include "iomp.h"
@@ -16,99 +17,107 @@ static bool g_loop = true;
 
 class Session {
 public:
-#if 0
-    class Data {
-    public:
-        inline explicit Data(unsigned int val) noexcept: _val(val) {
-            _data[0] = 0;
-        }
-        inline operator unsigned int() noexcept { return _val; }
-        inline int operator++() noexcept { return _val++; }
-        inline int operator++(int) noexcept { return ++_val; }
-    private:
-        unsigned int _val;
-        uint64_t _data[100];
-    };
-#else
-    typedef unsigned int Data;
-#endif
-    inline Session(::iomp::IOMultiPlexer& iomp, std::atomic<uint64_t>& count) noexcept/*:
-            _client(&Session::do_client, _sv.client(), std::ref(count))*/ {
+    typedef struct { uint8_t x[1024]; } Data;
+    inline Session(::iomp::IOMultiPlexer& iomp, std::atomic<uint64_t>& rcnt, std::atomic<uint64_t>& wcnt) noexcept:
+            _iomp(iomp), _rcnt(rcnt), _wcnt(wcnt), _delay({0, 100000000}) {
         int sv[2] = { -1, -1 };
         if (socketpair(AF_LOCAL, SOCK_STREAM, 0, sv) != 0) {
             fprintf(stderr, "socketpair fail: %s\n", strerror(errno));
             return;
         }
+#if 1
         fcntl(sv[0], F_SETFL, fcntl(sv[0], F_GETFL, 0) | O_NONBLOCK);
+        iomp.read(sv[0], &_rbuf, sizeof(_rbuf),
+                std::bind(std::mem_fn(&Session::on_read), this,
+                    std::placeholders::_1, std::placeholders::_2));
+#else
+        std::thread thr1 { [buf, &rcnt](int sock) {
+            while (1) {
+                auto len = read(sock, buf, sizeof(*buf));
+                if (len != sizeof(*buf)) {
+                    break;
+                }
+                rcnt++;
+            }
+            delete buf;
+            close(sock);
+        }, sv[0]};
+        thr1.detach();
+#endif
+#if 0
+        std::thread thr2 { [&wcnt](int sock) {
+            Data data;
+            auto& seq = *reinterpret_cast<uint64_t*>(&data);
+            seq = 0xdeadc00dfacebabe;
+            size_t len = sizeof(data);
+            setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &len, sizeof(len));
+            while (1) {
+                auto len = write(sock, &data, sizeof(data));
+                if (len != sizeof(data)) {
+                    break;
+                }
+                wcnt++;
+                //IOMP_LOG(WARNING, "write %lx done", seq++);
+                //struct timespec ts { 0, 100000000 };
+                //nanosleep(&ts, nullptr);
+            }
+            //delete buf2;
+            close(sock);
+        }, sv[1]};
+        thr2.detach();
+#else
         fcntl(sv[1], F_SETFL, fcntl(sv[1], F_GETFL, 0) | O_NONBLOCK);
-        auto buf = new Data(0);
-        iomp.read(sv[0], buf, sizeof(*buf), [&iomp](::iomp::AsyncIO& aio, int error) {
-            Session::do_server(iomp, aio, error);
-        });
-        auto buf2 = new Data(0xdeadc00d);
-        iomp.write(sv[1], buf2, sizeof(*buf2), [&iomp, &count](::iomp::AsyncIO& aio, int error) {
-            Session::do_client(iomp, aio, error, count);
-        });
+        iomp.write(sv[1], &_wbuf, sizeof(_wbuf),
+                std::bind(std::mem_fn(&Session::on_write), this,
+                    std::placeholders::_1, std::placeholders::_2));
+#endif
     }
-    inline ~Session() noexcept {
-        //_client.join();
-    }
+    Session(const Session&) noexcept = delete;
+    Session& operator=(const Session&) noexcept = delete;
+    Session(Session&&) noexcept = delete;
+    Session& operator=(Session&&) noexcept = delete;
 public:
-    static void do_server(::iomp::IOMultiPlexer& iomp, ::iomp::AsyncIO& aio, int error) noexcept {
+    void on_read(::iomp::AsyncIO& aio, int error) noexcept {
+        //IOMP_LOG(WARNING, "read(%d, %p, %zu) -> %d", aio.fildes, aio.buf, aio.nbytes, error);
         if (error == 0) {
-            //fprintf(stderr, "recv 0x%x\n", *reinterpret_cast<unsigned int*>(aio.buf));
-            //struct timespec ts = { 0, 1000000 };
-            //nanosleep(&ts, nullptr);
-            iomp.read(aio);
+            //nanosleep(&_delay, nullptr);
+            _rcnt++;
+            //auto seq = *reinterpret_cast<uint64_t*>(reinterpret_cast<Data*>(aio.buf));
+            //auto seq2 = *reinterpret_cast<uint64_t*>(&_rbuf);
+            //IOMP_LOG(WARNING, "read again seq=%p->%lx, %p->%lx -> %d", aio.buf, seq, &_rbuf, seq2, aio.fildes);
+            _iomp.read(aio);
         } else {
             if (error > 0) {
                 fprintf(stderr, "read fail: %s\n", strerror(error));
             } else {
                 fprintf(stderr, "read end\n");
             }
-            delete reinterpret_cast<Data*>(aio.buf);
             close(aio);
-            //shutdown(aio, SHUT_RDWR);
         }
     }
-    static void do_client(::iomp::IOMultiPlexer& iomp, ::iomp::AsyncIO& aio, int error,
-            std::atomic<uint64_t>& count) noexcept {
+    void on_write(::iomp::AsyncIO& aio, int error) noexcept {
         if (error == 0) {
-            auto& data = *reinterpret_cast<Data*>(aio.buf);
-            //fprintf(stderr, "send 0x%x\n", data);
-            data++;
-            count++;
-            //struct timespec ts = { 0, 1000000 };
-            //nanosleep(&ts, nullptr);
-            iomp.write(aio);
+            _wcnt++;
+            //nanosleep(&_delay, nullptr);
+            auto& seq = *reinterpret_cast<uint64_t*>(&_wbuf);
+            seq++;
+            _iomp.write(aio);
         } else {
             if (error > 0) {
                 fprintf(stderr, "write fail: %s\n", strerror(error));
             } else {
                 fprintf(stderr, "write end\n");
             }
-            delete reinterpret_cast<Data*>(aio.buf);
             close(aio);
-            //shutdown(aio, SHUT_RDWR);
         }
     }
-#if 0
-    static void do_client(int sock, std::atomic<uint64_t>& count) {
-        uint64_t data = 0xdeadbeeffacebabe;
-        while (1) {
-            auto len = write(sock, &data, sizeof(data));
-            if (len != sizeof(data)) {
-                fprintf(stderr, "write fail: %s\n", strerror(errno));
-                break;
-            }
-            data++;
-            count++;
-        }
-    }
-#endif
 private:
-    //SocketPair _sv;
-    //std::thread _client;
+    ::iomp::IOMultiPlexer& _iomp;
+    std::atomic<uint64_t>& _rcnt;
+    std::atomic<uint64_t>& _wcnt;
+    Data _rbuf;
+    Data _wbuf;
+    struct timespec _delay;
 };
 
 int main(int argc, char* argv[]) {
@@ -116,17 +125,25 @@ int main(int argc, char* argv[]) {
     signal(SIGINT, [](int sig) noexcept {
         g_loop = false;
     });
-    std::atomic<uint64_t> count { 0 };
+    std::atomic<uint64_t> rcnt { 0 };
+    std::atomic<uint64_t> wcnt { 0 };
     std::vector<std::unique_ptr<Session>> sess;
+    //::iomp_loglevel(IOMP_LOGLEVEL_DEBUG);
     ::iomp::IOMultiPlexer iomp { 1 };
-    for (int i = 0; i < 4; i++) {
-        sess.emplace_back(std::unique_ptr<Session>(new Session(iomp, count)));
+    for (int i = 0; i < 1; i++) {
+        sess.emplace_back(std::unique_ptr<Session>(new Session(iomp, rcnt, wcnt)));
     }
-    //while (g_loop) {
-    for (int i = 0; i < 5; i++) {
-        sleep(1);
-        auto qps = count.exchange(0);
-        fprintf(stderr, "%zu qps(s)\n", (size_t)qps);
+    while (g_loop) {
+    //for (int i = 0; i < 5; i++) {
+        //struct timespec ts { 0, 100000000 };
+        struct timespec ts { 1, 0 };
+        nanosleep(&ts, nullptr);
+        auto rqps = rcnt.exchange(0);
+        auto wqps = wcnt.exchange(0);
+        auto qps = std::min(rqps, wqps);
+        fprintf(stderr, "%zu/%zu qps, %zu bit, %.2f Mbps\n",
+                (size_t)rqps, (size_t)wqps, sizeof(Session::Data),
+                qps / 1024.0 / 1024.0 * sizeof(Session::Data) * 8);
     }
     return 0;
 }

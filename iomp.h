@@ -2,6 +2,7 @@
 #define IOMP_H
 
 #include <stddef.h>
+#include <stdint.h>
 #include <sys/queue.h>
 
 #ifdef __cplusplus
@@ -10,24 +11,28 @@ extern "C" {
 
 #define IOMP_API __attribute__((visibility("default")))
 
+#define IOMP_LOGLEVEL_DEBUG     1
+#define IOMP_LOGLEVEL_INFO      2
+#define IOMP_LOGLEVEL_NOTICE    3
+#define IOMP_LOGLEVEL_WARNING   4
+#define IOMP_LOGLEVEL_ERROR     5
+#define IOMP_LOGLEVEL_FATAL     6
+
+#define IOMP_LOG(level, fmt, ...) \
+    do { \
+        char __buf[27] = {'\0'}; \
+        iomp_writelog(IOMP_LOGLEVEL_##level, \
+                "[libiomp] " #level " %s " __FILE__ ":%s:%d " fmt "\n", \
+                iomp_now(__buf, sizeof(__buf)), \
+                __func__, __LINE__, ##__VA_ARGS__); \
+    } while (0)
+
+IOMP_API const char* iomp_now(char* buf, size_t bufsz);
+IOMP_API int iomp_writelog(int level, const char* fmt, ...);
+IOMP_API int iomp_loglevel(int level);
+
 struct iomp_core;
 typedef struct iomp_core* iomp_t;
-
-#if 0
-struct iomp_signal {
-    int signal;
-    int (*ready)(struct iomp_signal* sig, int ntime);
-    void* udata;
-};
-typedef struct iomp_signal* iomp_signal_t;
-
-struct iomp_accept {
-    int fildes;
-    int (*ready)(struct iomp_accept* accp, int sock);
-    void* udata;
-};
-typedef struct iomp_accept* iomp_accept_t;
-#endif
 
 struct iomp_aio {
     STAILQ_ENTRY(iomp_aio) entries;
@@ -44,11 +49,7 @@ struct iomp_aio {
 typedef struct iomp_aio* iomp_aio_t;
 
 IOMP_API iomp_t iomp_new(int nthreads);
-
 IOMP_API void iomp_drop(iomp_t iomp);
-
-//IOMP_API int iomp_signal(iomp_t iomp, const iomp_signal_t sig);
-//IOMP_API int iomp_accept(iomp_t iomp, const iomp_accept_t accp);
 IOMP_API void iomp_read(iomp_t iomp, iomp_aio_t aio);
 IOMP_API void iomp_write(iomp_t iomp, iomp_aio_t aio);
 
