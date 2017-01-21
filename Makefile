@@ -1,7 +1,7 @@
 LIB=libiomp.a
 
 CC=cc
-CFLAGS=-std=c99 -g -Wall -pipe -fPIC -fvisibility=hidden
+CFLAGS=-std=c99 -g -Wall -pipe -fPIC -fvisibility=hidden -D_BSD_SOURCE
 CXX=c++
 CXXFLAGS=-std=c++11 -g -Wall -pipe
 AR=ar

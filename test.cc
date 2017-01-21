@@ -28,19 +28,31 @@ public:
             IOMP_LOG(ERROR, "socketpair fail: %s", strerror(errno));
             return;
         }
+#if 1
         fcntl(sv[0], F_SETFL, fcntl(sv[0], F_GETFL, 0) | O_NONBLOCK);
         iomp.read(sv[0], &_rbuf, sizeof(_rbuf),
                 std::bind(std::mem_fn(&Session::on_read), this,
                     std::placeholders::_1, std::placeholders::_2));
+#else
+        std::thread t0 { [this](int sock) {
+            while (1) {
+                auto len = read(sock, &this->_rbuf, sizeof(this->_rbuf));
+                if (len != sizeof(this->_rbuf)) {
+                    break;
+                }
+                this->_rcnt++;
+            }
+            close(sock);
+        }, sv[0] };
+        t0.detach();
+#endif
 #if 1
         fcntl(sv[1], F_SETFL, fcntl(sv[1], F_GETFL, 0) | O_NONBLOCK);
-        //size_t len = sizeof(Data);
-        //setsockopt(sv[1], SOL_SOCKET, SO_SNDBUF, &len, sizeof(len));
         iomp.write(sv[1], &_wbuf, sizeof(_wbuf),
                 std::bind(std::mem_fn(&Session::on_write), this,
                     std::placeholders::_1, std::placeholders::_2));
 #else
-        std::thread t { [this](int sock) {
+        std::thread t1 { [this](int sock) {
             while (1) {
                 auto len = write(sock, &this->_wbuf, sizeof(this->_wbuf));
                 if (len != sizeof(this->_wbuf)) {
@@ -51,7 +63,7 @@ public:
             }
             close(sock);
         }, sv[1] };
-        t.detach();
+        t1.detach();
 #endif
     }
     Session(const Session&) noexcept = delete;
@@ -77,9 +89,9 @@ public:
     void on_write(::iomp::AsyncIO& aio, int error) noexcept {
         if (error == 0) {
             _wcnt++;
-            auto& seq = *reinterpret_cast<uint64_t*>(&_wbuf);
+            //auto& seq = *reinterpret_cast<uint64_t*>(&_wbuf);
             //IOMP_LOG(WARNING, "write 0x%lx", seq);
-            seq++;
+            //seq++;
             //struct timespec ts = { 0, 1000000000 }; nanosleep(&ts, nullptr);
             _iomp.write(aio);
         } else {
@@ -109,7 +121,7 @@ int main(int argc, char* argv[]) {
     std::vector<std::unique_ptr<Session>> sess;
     ::iomp_loglevel(IOMP_LOGLEVEL_DEBUG);
     ::iomp::IOMultiPlexer iomp { 0 };
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < 16; i++) {
         sess.emplace_back(std::unique_ptr<Session>(new Session(iomp, rcnt, wcnt)));
     }
     while (g_loop) {

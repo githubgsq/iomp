@@ -15,9 +15,7 @@
 #define IOMP_COMPLETE(aio, err) \
     do { \
         (aio)->complete((aio), (err)); \
-        if (iomp_release(&(aio)->refcnt) == 0) { \
-            (aio)->release((aio)); \
-        } \
+        (aio)->release((aio)); \
     } while (0)
 
 struct iomp_thread {
@@ -99,11 +97,11 @@ void iomp_drop(iomp_t iomp) {
 }
 
 void iomp_read(iomp_t iomp, iomp_aio_t aio) {
-    if (!aio || !aio->complete || !aio->release) {
+    if (!aio || !aio->complete || !aio->addref || !aio->release) {
         IOMP_LOG(ERROR, "invalid argument");
         return;
     }
-    iomp_addref(&aio->refcnt);
+    aio->addref(aio);
     if (!iomp || !aio->buf || aio->nbytes == 0) {
         IOMP_COMPLETE(aio, EINVAL);
         return;
@@ -114,11 +112,11 @@ void iomp_read(iomp_t iomp, iomp_aio_t aio) {
 }
 
 void iomp_write(iomp_t iomp, iomp_aio_t aio) {
-    if (!aio || !aio->complete || !aio->release) {
+    if (!aio || !aio->complete || !aio->addref || !aio->release) {
         IOMP_LOG(ERROR, "invalid argument");
         return;
     }
-    iomp_addref(&aio->refcnt);
+    aio->addref(aio);
     if (!iomp || !aio->buf || aio->nbytes == 0) {
         IOMP_COMPLETE(aio, EINVAL);
         return;
@@ -229,12 +227,12 @@ void do_read(iomp_t iomp, iomp_queue_t q, iomp_aio_t aio) {
                 aio->nbytes, aio->offset,
                 len, err);
 #endif
-        if (len == todo) {
+        if (len > 0) {
             aio->offset += len;
-            IOMP_COMPLETE(aio, 0);
-            break;
-        } else if (len > 0) {
-            aio->offset += len;
+            if (len == todo) {
+                IOMP_COMPLETE(aio, 0);
+                break;
+            }
         } else if (len == -1 && errno == EAGAIN) {
             if (iomp_queue_read(q, aio) == -1) {
                 IOMP_COMPLETE(aio, errno);
@@ -251,12 +249,17 @@ void do_write(iomp_t iomp, iomp_queue_t q, iomp_aio_t aio) {
     while (1) {
         size_t todo = aio->nbytes - aio->offset;
         ssize_t len = write(aio->fildes, aio->buf + aio->offset, todo);
-        if (len == todo) {
+#if 0
+        IOMP_LOG(DEBUG, "write(%d, %p+%zu, %zu-%zu) -> (%zd, %s)",
+                aio->fildes, aio->buf, aio->offset, aio->nbytes, aio->offset,
+                len, len == -1 ? strerror(errno) : (len == 0 ? "eof" : "succ"));
+#endif
+        if (len > 0) {
             aio->offset += len;
-            IOMP_COMPLETE(aio, 0);
-            break;
-        } else if (len > 0) {
-            aio->offset += len;
+            if (len == todo) {
+                IOMP_COMPLETE(aio, 0);
+                break;
+            }
         } else if (len == -1 && errno == EAGAIN) {
             if (iomp_queue_write(q, aio) == -1) {
                 IOMP_COMPLETE(aio, errno);
@@ -282,7 +285,7 @@ int get_ncpu() {
 #elif defined(__linux__)
     ncpu = sysconf(_SC_NPROCESSORS_ONLN);
     if (ncpu == -1) {
-        IOMP_LOG(ERROR, "sysconf fail: %s", strerror(rv));
+        IOMP_LOG(ERROR, "sysconf fail: %s", strerror(errno));
     }
 #endif
     return ncpu;

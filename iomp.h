@@ -55,7 +55,7 @@ struct iomp_aio {
     size_t offset;
     void (*execute)(iomp_t iomp, struct iomp_queue* q, struct iomp_aio* aio);
     void (*complete)(struct iomp_aio* aio, int error);
-    volatile uint64_t refcnt;
+    void (*addref)(struct iomp_aio*);
     void (*release)(struct iomp_aio*);
 };
 typedef struct iomp_aio* iomp_aio_t;
@@ -68,6 +68,7 @@ IOMP_API void iomp_write(iomp_t iomp, iomp_aio_t aio);
 #ifdef __cplusplus
 }
 
+#include <atomic>
 #include <functional>
 
 namespace iomp {
@@ -83,8 +84,9 @@ public:
                 { nullptr },
                 fildes, buf, nbytes, timeout_ms,
                 0, nullptr, &AsyncIO::complete,
-                0, &AsyncIO::release,
+                &AsyncIO::addref, &AsyncIO::release,
             }),
+            _refcnt(0),
             _complete(complete) {
     }
     AsyncIO(const AsyncIO&) noexcept = delete;
@@ -98,11 +100,18 @@ private:
         auto self = reinterpret_cast<AsyncIO*>(aio);
         self->_complete(*self, error);
     }
+    static void addref(::iomp_aio_t aio) noexcept {
+        auto self = reinterpret_cast<AsyncIO*>(aio);
+        self->_refcnt++;
+    }
     static void release(::iomp_aio_t aio) noexcept {
         auto self = reinterpret_cast<AsyncIO*>(aio);
-        delete self;
+        if (--self->_refcnt == 0) {
+            delete self;
+        }
     }
 private:
+    std::atomic<uint64_t> _refcnt;
     std::function<void(AsyncIO&, int)> _complete;
 };
 
