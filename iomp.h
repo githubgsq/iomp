@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <errno.h>
 #include <sys/queue.h>
 
 #ifdef __cplusplus
@@ -10,6 +11,11 @@ extern "C" {
 #endif /* __cplusplus */
 
 #define IOMP_API __attribute__((visibility("default")))
+
+#if defined(__APPLE__) || defined(__DragonFly__) || defined(__FreeBSD__) || \
+    defined(__OpenBSD__) || defined(__NetBSD__)
+#define __BSD__
+#endif /* __BSD__ */
 
 #define IOMP_LOGLEVEL_DEBUG     1
 #define IOMP_LOGLEVEL_INFO      2
@@ -20,12 +26,16 @@ extern "C" {
 
 #define IOMP_LOG(level, fmt, ...) \
     do { \
+        int err = errno; \
         char __buf[27] = {'\0'}; \
         iomp_writelog(IOMP_LOGLEVEL_##level, \
                 "[libiomp] " #level " %s " __FILE__ ":%s:%d " fmt "\n", \
                 iomp_now(__buf, sizeof(__buf)), \
                 __func__, __LINE__, ##__VA_ARGS__); \
+        errno = err; \
     } while (0)
+
+#define IOMP_EVENT_LIMIT 1024
 
 IOMP_API const char* iomp_now(char* buf, size_t bufsz);
 IOMP_API int iomp_writelog(int level, const char* fmt, ...);
@@ -34,6 +44,8 @@ IOMP_API int iomp_loglevel(int level);
 struct iomp_core;
 typedef struct iomp_core* iomp_t;
 
+struct iomp_queue;
+
 struct iomp_aio {
     STAILQ_ENTRY(iomp_aio) entries;
     int fildes;
@@ -41,7 +53,7 @@ struct iomp_aio {
     size_t nbytes;
     int timeout_ms;
     size_t offset;
-    void (*execute)(iomp_t iomp, struct iomp_aio* aio);
+    void (*execute)(iomp_t iomp, struct iomp_queue* q, struct iomp_aio* aio);
     void (*complete)(struct iomp_aio* aio, int error);
     volatile uint64_t refcnt;
     void (*release)(struct iomp_aio*);

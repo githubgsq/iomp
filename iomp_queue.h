@@ -1,5 +1,5 @@
-#ifndef IOMP_QUEUE_H
-#define IOMP_QUEUE_H
+#ifndef IOMP_EVENT_H
+#define IOMP_EVENT_H
 
 #include <stdint.h>
 #include <stddef.h>
@@ -7,7 +7,7 @@
 struct iomp_queue;
 typedef struct iomp_queue* iomp_queue_t;
 
-iomp_queue_t iomp_queue_new(int nevents);
+iomp_queue_t iomp_queue_new();
 void iomp_queue_drop(iomp_queue_t q);
 
 struct iomp_aio;
@@ -26,5 +26,5 @@ void iomp_evlist_drop(iomp_evlist_t evs);
 int iomp_evlist_next(iomp_evlist_t evs, iomp_event_t ev);
 #endif
 
-#endif /* IOMP_QUEUE_H */
+#endif /* IOMP_EVENT_H */
 
