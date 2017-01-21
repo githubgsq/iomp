@@ -16,9 +16,7 @@
 #define IOMP_COMPLETE(aio, err) \
     do { \
         (aio)->complete((aio), (err)); \
-        if (iomp_release(&(aio)->refcnt) == 0) { \
-            (aio)->release((aio)); \
-        } \
+        (aio)->release((aio)); \
     } while (0)
 
 struct iomp_queue {
