@@ -10,7 +10,6 @@
 #include <sys/epoll.h>
 #include <sys/types.h>
 #include <sys/socket.h>
-#include "iomp_atomic.h"
 #include "iomp_queue.h"
 
 struct iomp_queue {

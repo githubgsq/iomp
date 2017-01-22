@@ -9,7 +9,6 @@
 #include <sys/queue.h>
 #include <sys/types.h>
 #include <sys/sysctl.h>
-#include "iomp_atomic.h"
 #include "iomp_queue.h"
 #include "iomp.h"
 
