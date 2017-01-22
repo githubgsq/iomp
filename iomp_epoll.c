@@ -13,12 +13,6 @@
 #include "iomp_atomic.h"
 #include "iomp_queue.h"
 
-#define IOMP_COMPLETE(aio, err) \
-    do { \
-        (aio)->complete((aio), (err)); \
-        (aio)->release((aio)); \
-    } while (0)
-
 struct iomp_queue {
     int epfd;
     int intr[2];
@@ -26,8 +20,8 @@ struct iomp_queue {
     struct epoll_event evs[];
 };
 
-static void on_read(iomp_queue_t q, iomp_aio_t aio);
-static void on_write(iomp_queue_t q, iomp_aio_t aio);
+static void on_read(iomp_queue_t q, iomp_aiojb_t job);
+static void on_write(iomp_queue_t q, iomp_aiojb_t job);
 
 iomp_queue_t iomp_queue_new(int nevents) {
     if (nevents <= 0) {
@@ -77,13 +71,13 @@ void iomp_queue_drop(iomp_queue_t q) {
     free(q);
 }
 
-int iomp_queue_read(iomp_queue_t q, iomp_aio_t aio) {
-    if (!q || !aio) {
+int iomp_queue_read(iomp_queue_t q, iomp_aiojb_t job) {
+    if (!q || !job) {
         errno = EINVAL;
         return -1;
     }
-    struct epoll_event epev = { EPOLLIN | EPOLLET, { aio } };
-    int rv = epoll_ctl(q->epfd, EPOLL_CTL_ADD, aio->fildes, &epev);
+    struct epoll_event epev = { EPOLLIN | EPOLLET, { job } };
+    int rv = epoll_ctl(q->epfd, EPOLL_CTL_ADD, job->aio->fildes, &epev);
     /*if (rv == -1 && errno == EEXIST) {
         rv = epoll_ctl(q->epfd, EPOLL_CTL_MOD, aio->fildes, &epev);
     }*/
@@ -99,13 +93,13 @@ int iomp_queue_read(iomp_queue_t q, iomp_aio_t aio) {
     return rv;
 }
 
-int iomp_queue_write(iomp_queue_t q, iomp_aio_t aio) {
-    if (!q || !aio) {
+int iomp_queue_write(iomp_queue_t q, iomp_aiojb_t job) {
+    if (!q || !job) {
         errno = EINVAL;
         return -1;
     }
-    struct epoll_event epev = { EPOLLOUT | EPOLLET, { aio } };
-    int rv = epoll_ctl(q->epfd, EPOLL_CTL_ADD, aio->fildes, &epev);
+    struct epoll_event epev = { EPOLLOUT | EPOLLET, { job } };
+    int rv = epoll_ctl(q->epfd, EPOLL_CTL_ADD, job->aio->fildes, &epev);
 #if 0
     if (rv == -1) {
         IOMP_LOG(DEBUG, "epoll_ctl(%d, add, %d, EPOLLOUT) fail: %s",
@@ -138,10 +132,10 @@ int iomp_queue_run(iomp_queue_t q, int timeout) {
             continue;
         }
         if (epev->events & EPOLLIN) {
-            on_read(q, (iomp_aio_t)epev->data.ptr);
+            on_read(q, (iomp_aiojb_t)epev->data.ptr);
         }
         if (epev->events & EPOLLOUT) {
-            on_write(q, (iomp_aio_t)epev->data.ptr);
+            on_write(q, (iomp_aiojb_t)epev->data.ptr);
         }
     }
     return 0;
@@ -155,16 +149,18 @@ void iomp_queue_interrupt(iomp_queue_t q) {
     write(q->intr[1], &buf, sizeof(buf));
 }
 
-void on_read(iomp_queue_t q, iomp_aio_t aio) {
+void on_read(iomp_queue_t q, iomp_aiojb_t job) {
+    iomp_aio_t aio = job->aio;
     while (1) {
-        size_t todo = aio->nbytes - aio->offset;
-        ssize_t len = read(aio->fildes, aio->buf + aio->offset, todo);
+        size_t todo = aio->nbytes - job->offset;
+        ssize_t len = read(aio->fildes, aio->buf + job->offset, todo);
         if (len > 0) {
-            aio->offset += len;
+            job->offset += len;
             if (len == todo) {
                 struct epoll_event epev = { EPOLLIN, { NULL } };
                 epoll_ctl(q->epfd, EPOLL_CTL_DEL, aio->fildes, &epev);
-                IOMP_COMPLETE(aio, 0);
+                aio->complete(aio, 0);
+                free(job);
                 break;
             }
         } else if (len == -1 && errno == EAGAIN) {
@@ -172,21 +168,24 @@ void on_read(iomp_queue_t q, iomp_aio_t aio) {
         } else {
             struct epoll_event epev = { EPOLLIN, { NULL } };
             epoll_ctl(q->epfd, EPOLL_CTL_DEL, aio->fildes, &epev);
-            IOMP_COMPLETE(aio, len == -1 ? errno : -1);
+            aio->complete(aio, len == -1 ? errno : -1);
+            free(job);
         }
     }
 }
 
-void on_write(iomp_queue_t q, iomp_aio_t aio) {
+void on_write(iomp_queue_t q, iomp_aiojb_t job) {
+    iomp_aio_t aio = job->aio;
     while (1) {
-        size_t todo = aio->nbytes - aio->offset;
-        ssize_t len = write(aio->fildes, aio->buf + aio->offset, todo);
+        size_t todo = aio->nbytes - job->offset;
+        ssize_t len = write(aio->fildes, aio->buf + job->offset, todo);
         if (len > 0) {
-            aio->offset += len;
+            job->offset += len;
             if (len == todo) {
                 struct epoll_event epev = { EPOLLOUT, { NULL } };
                 epoll_ctl(q->epfd, EPOLL_CTL_DEL, aio->fildes, &epev);
-                IOMP_COMPLETE(aio, 0);
+                aio->complete(aio, 0);
+                free(job);
                 break;
             }
         } else if (len == -1 && errno == EAGAIN) {
@@ -194,7 +193,8 @@ void on_write(iomp_queue_t q, iomp_aio_t aio) {
         } else {
             struct epoll_event epev = { EPOLLOUT, { NULL } };
             epoll_ctl(q->epfd, EPOLL_CTL_DEL, aio->fildes, &epev);
-            IOMP_COMPLETE(aio, len == -1 ? errno : -1);
+            aio->complete(aio, len == -1 ? errno : -1);
+            free(job);
         }
     }
 }

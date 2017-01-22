@@ -4,7 +4,6 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <errno.h>
-#include <sys/queue.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -47,16 +46,11 @@ typedef struct iomp_core* iomp_t;
 struct iomp_queue;
 
 struct iomp_aio {
-    STAILQ_ENTRY(iomp_aio) entries;
     int fildes;
     void* buf;
     size_t nbytes;
     int timeout_ms;
-    size_t offset;
-    void (*execute)(iomp_t iomp, struct iomp_queue* q, struct iomp_aio* aio);
     void (*complete)(struct iomp_aio* aio, int error);
-    void (*addref)(struct iomp_aio*);
-    void (*release)(struct iomp_aio*);
 };
 typedef struct iomp_aio* iomp_aio_t;
 
@@ -77,42 +71,22 @@ class IOMultiPlexer;
 
 class AsyncIO : public ::iomp_aio {
 public:
-    inline AsyncIO(int fildes, void* buf, size_t nbytes,
-        std::function<void(AsyncIO&, int)> complete,
-        int timeout_ms = -1) noexcept:
-            ::iomp_aio({
-                { nullptr },
-                fildes, buf, nbytes, timeout_ms,
-                0, nullptr, &AsyncIO::complete,
-                &AsyncIO::addref, &AsyncIO::release,
-            }),
-            _refcnt(0),
-            _complete(complete) {
+    inline AsyncIO(int fildes, void* buf, size_t nbytes, int timeout = -1) noexcept:
+            ::iomp_aio({ fildes, buf, nbytes, timeout_ms, &AsyncIO::complete }) {
     }
+    virtual ~AsyncIO() noexcept { }
     AsyncIO(const AsyncIO&) noexcept = delete;
     AsyncIO& operator=(const AsyncIO&) noexcept = delete;
     AsyncIO(AsyncIO&&) noexcept = delete;
     AsyncIO& operator=(AsyncIO&&) noexcept = delete;
 public:
     inline operator int() noexcept { return fildes; }
+    virtual void complete(int error) noexcept = 0;
 private:
     static void complete(::iomp_aio_t aio, int error) noexcept {
-        auto self = reinterpret_cast<AsyncIO*>(aio);
-        self->_complete(*self, error);
+        auto self = static_cast<AsyncIO*>(aio);
+        self->complete(error);
     }
-    static void addref(::iomp_aio_t aio) noexcept {
-        auto self = reinterpret_cast<AsyncIO*>(aio);
-        self->_refcnt++;
-    }
-    static void release(::iomp_aio_t aio) noexcept {
-        auto self = reinterpret_cast<AsyncIO*>(aio);
-        if (--self->_refcnt == 0) {
-            delete self;
-        }
-    }
-private:
-    std::atomic<uint64_t> _refcnt;
-    std::function<void(AsyncIO&, int)> _complete;
 };
 
 class IOMultiPlexer {
@@ -136,23 +110,17 @@ public:
 public:
     inline explicit operator bool() noexcept { return _iomp != nullptr; }
     inline operator ::iomp_t() noexcept { return _iomp; }
-    inline void read(int fildes, void* buf, size_t nbytes,
-            std::function<void(AsyncIO&, int)> complete,
-            int timeout=-1) noexcept {
-        ::iomp_read(_iomp,
-                new AsyncIO(fildes, buf, nbytes, complete, timeout));
-    }
     inline void read(AsyncIO& aio) noexcept {
         ::iomp_read(_iomp, &aio);
     }
-    inline void write(int fildes, void* buf, size_t nbytes,
-            std::function<void(AsyncIO&, int)> complete,
-            int timeout=-1) noexcept {
-        ::iomp_write(_iomp,
-                new AsyncIO(fildes, buf, nbytes, complete, timeout));
+    inline void read(AsyncIO* aio) noexcept {
+        ::iomp_read(_iomp, aio);
     }
     inline void write(AsyncIO& aio) noexcept {
         ::iomp_write(_iomp, &aio);
+    }
+    inline void write(AsyncIO* aio) noexcept {
+        ::iomp_write(_iomp, aio);
     }
 private:
     ::iomp_t _iomp;
