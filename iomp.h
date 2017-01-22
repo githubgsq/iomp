@@ -62,8 +62,8 @@ IOMP_API void iomp_write(iomp_t iomp, iomp_aio_t aio);
 #ifdef __cplusplus
 }
 
-#include <atomic>
 #include <functional>
+#include <stdexcept>
 
 namespace iomp {
 
@@ -113,14 +113,20 @@ public:
     inline void read(AsyncIO& aio) noexcept {
         ::iomp_read(_iomp, &aio);
     }
-    inline void read(AsyncIO* aio) noexcept {
-        ::iomp_read(_iomp, aio);
+    inline void read(AsyncIO* aio) {
+        if (!aio) {
+            throw std::invalid_argument("null pointer");
+        }
+        read(*aio);
     }
     inline void write(AsyncIO& aio) noexcept {
         ::iomp_write(_iomp, &aio);
     }
-    inline void write(AsyncIO* aio) noexcept {
-        ::iomp_write(_iomp, aio);
+    inline void write(AsyncIO* aio) {
+        if (!aio) {
+            throw std::invalid_argument("null pointer");
+        }
+        write(*aio);
     }
 private:
     ::iomp_t _iomp;
