@@ -20,6 +20,13 @@ struct iomp_thread {
 };
 typedef struct iomp_thread* iomp_thread_t;
 
+struct iomp_aiojb {
+    STAILQ_ENTRY(iomp_aiojb) entries;
+    struct iomp_aio* aio;
+    void (*execute)(struct iomp_aiojb* job, iomp_thread_t thread);
+};
+typedef struct iomp_aiojb* iomp_aiojb_t;
+
 struct iomp_core {
     pthread_mutex_t lock;
     pthread_cond_t quit;
@@ -124,7 +131,7 @@ void iomp_read(iomp_t iomp, iomp_aio_t aio) {
         IOMP_LOG(ERROR, "invalid argument");
         return;
     }
-    if (!iomp || !aio->buf || aio->nbytes == 0) {
+    if (!iomp || !aio->buf) {
         aio->complete(aio, EINVAL);
         return;
     }
@@ -134,7 +141,7 @@ void iomp_read(iomp_t iomp, iomp_aio_t aio) {
         return;
     }
     job->aio = aio;
-    job->offset = 0;
+    aio->offset = 0;
     job->execute = do_read;
     do_post(iomp, job);
 }
@@ -144,7 +151,7 @@ void iomp_write(iomp_t iomp, iomp_aio_t aio) {
         IOMP_LOG(ERROR, "invalid argument");
         return;
     }
-    if (!iomp || !aio->buf || aio->nbytes == 0) {
+    if (!iomp || !aio->buf) {
         aio->complete(aio, EINVAL);
         return;
     }
@@ -154,9 +161,39 @@ void iomp_write(iomp_t iomp, iomp_aio_t aio) {
         return;
     }
     job->aio = aio;
-    job->offset = 0;
+    aio->offset = 0;
     job->execute = do_write;
     do_post(iomp, job);
+}
+
+void iomp_accept(iomp_t iomp, iomp_aio_t aio) {
+    if (!aio || !aio->complete) {
+        IOMP_LOG(ERROR, "invalid argument");
+        return;
+    }
+    if (!iomp || aio->buf) {
+        aio->complete(aio, EINVAL);
+        return;
+    }
+    pthread_mutex_lock(&iomp->lock);
+    iomp_thread_t t = NULL;
+    TAILQ_FOREACH(t, &iomp->actived, entries) {
+        if (iomp_queue_accept(t->queue, aio) != 0) {
+            int error = errno;
+            pthread_mutex_unlock(&iomp->lock);
+            aio->complete(aio, error);
+            return;
+        }
+    }
+    TAILQ_FOREACH(t, &iomp->blocked, entries) {
+        if (iomp_queue_accept(t->queue, aio) != 0) {
+            int error = errno;
+            pthread_mutex_unlock(&iomp->lock);
+            aio->complete(aio, error);
+            return;
+        }
+    }
+    pthread_mutex_unlock(&iomp->lock);
 }
 
 iomp_thread_t iomp_thread_new(iomp_t iomp, int nevents) {
@@ -257,31 +294,24 @@ void do_stop(iomp_aiojb_t job, iomp_thread_t thread) {
 void do_read(iomp_aiojb_t job, iomp_thread_t thread) {
     iomp_aio_t aio = job->aio;
     while (1) {
-        size_t todo = aio->nbytes - job->offset;
-        ssize_t len = read(aio->fildes, aio->buf + job->offset, todo);
-#if 0
-        IOMP_LOG(NOTICE, "read(%d, %p+%zu, %zu-%zu) -> (%zd, %d)",
-                aio->fildes,
-                aio->buf, job->offset,
-                aio->nbytes, job->offset,
-                len, err);
-#endif
+        size_t todo = aio->nbytes - aio->offset;
+        ssize_t len = read(aio->fildes, aio->buf + aio->offset, todo);
         if (len > 0) {
-            job->offset += len;
+            aio->offset += len;
             if (len == todo) {
-                aio->complete(aio, 0);
                 free(job);
+                aio->complete(aio, 0);
                 break;
             }
         } else if (len == -1 && errno == EAGAIN) {
-            if (iomp_queue_read(thread->queue, job) == -1) {
+            free(job);
+            if (iomp_queue_read(thread->queue, aio) == -1) {
                 aio->complete(aio, errno);
-                free(job);
             }
             break;
         } else {
-            aio->complete(aio, (len == -1 ? errno : -1));
             free(job);
+            aio->complete(aio, (len == -1 ? errno : -1));
             break;
         }
     }
@@ -290,29 +320,24 @@ void do_read(iomp_aiojb_t job, iomp_thread_t thread) {
 void do_write(iomp_aiojb_t job, iomp_thread_t thread) {
     iomp_aio_t aio = job->aio;
     while (1) {
-        size_t todo = aio->nbytes - job->offset;
-        ssize_t len = write(aio->fildes, aio->buf + job->offset, todo);
-#if 0
-        IOMP_LOG(DEBUG, "write(%d, %p+%zu, %zu-%zu) -> (%zd, %s)",
-                aio->fildes, aio->buf, job->offset, aio->nbytes, job->offset,
-                len, len == -1 ? strerror(errno) : (len == 0 ? "eof" : "succ"));
-#endif
+        size_t todo = aio->nbytes - aio->offset;
+        ssize_t len = write(aio->fildes, aio->buf + aio->offset, todo);
         if (len > 0) {
-            job->offset += len;
+            aio->offset += len;
             if (len == todo) {
-                aio->complete(aio, 0);
                 free(job);
+                aio->complete(aio, 0);
                 break;
             }
         } else if (len == -1 && errno == EAGAIN) {
-            if (iomp_queue_write(thread->queue, job) == -1) {
+            free(job);
+            if (iomp_queue_write(thread->queue, aio) == -1) {
                 aio->complete(aio, errno);
-                free(job);
             }
             break;
         } else {
-            aio->complete(aio, (len == -1 ? errno : -1));
             free(job);
+            aio->complete(aio, (len == -1 ? errno : -1));
             break;
         }
     }

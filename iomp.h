@@ -49,6 +49,7 @@ struct iomp_aio {
     int fildes;
     void* buf;
     size_t nbytes;
+    size_t offset;
     int timeout_ms;
     void (*complete)(struct iomp_aio* aio, int error);
 };
@@ -58,6 +59,7 @@ IOMP_API iomp_t iomp_new(int nthreads);
 IOMP_API void iomp_drop(iomp_t iomp);
 IOMP_API void iomp_read(iomp_t iomp, iomp_aio_t aio);
 IOMP_API void iomp_write(iomp_t iomp, iomp_aio_t aio);
+IOMP_API void iomp_accept(iomp_t iomp, iomp_aio_t aio);
 
 #ifdef __cplusplus
 }
@@ -72,7 +74,7 @@ class IOMultiPlexer;
 class AsyncIO : public ::iomp_aio {
 public:
     inline AsyncIO(int fildes, void* buf, size_t nbytes, int timeout = -1) noexcept:
-            ::iomp_aio({ fildes, buf, nbytes, timeout_ms, &AsyncIO::complete }) {
+            ::iomp_aio({ fildes, buf, nbytes, 0, timeout_ms, &AsyncIO::complete }) {
     }
     virtual ~AsyncIO() noexcept { }
     AsyncIO(const AsyncIO&) noexcept = delete;
@@ -117,7 +119,7 @@ public:
         if (!aio) {
             throw std::invalid_argument("null pointer");
         }
-        read(*aio);
+        this->read(*aio);
     }
     inline void write(AsyncIO& aio) noexcept {
         ::iomp_write(_iomp, &aio);
@@ -126,7 +128,16 @@ public:
         if (!aio) {
             throw std::invalid_argument("null pointer");
         }
-        write(*aio);
+        this->write(*aio);
+    }
+    inline void accept(AsyncIO& aio) noexcept {
+        ::iomp_accept(_iomp, &aio);
+    }
+    inline void accept(AsyncIO* aio) {
+        if (!aio) {
+            throw std::invalid_argument("null pointer");
+        }
+        this->accept(*aio);
     }
 private:
     ::iomp_t _iomp;
