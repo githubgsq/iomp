@@ -14,7 +14,6 @@
 #include <sys/socket.h>
 #include <netdb.h>
 #include "iomp.h"
-#include "helper.h"
 
 typedef struct { char x[1024]; } data_type;
 
