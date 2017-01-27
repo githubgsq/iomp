@@ -86,7 +86,7 @@ public:
             ::iomp::AsyncIO(-1, nullptr, 0),
             _iomp(iomp) {
         struct addrinfo hint = {
-            0, AF_INET, SOCK_STREAM, IPPROTO_TCP, 0, NULL, NULL, NULL,
+            0, AF_INET, SOCK_STREAM, 0, 0, NULL, NULL, NULL,
         };
         struct addrinfo* ai = nullptr;
         getaddrinfo(host, port, &hint, &ai);
