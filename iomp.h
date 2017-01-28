@@ -74,7 +74,7 @@ class IOMultiPlexer;
 class AsyncIO : public ::iomp_aio {
 public:
     inline AsyncIO(int fildes, void* buf, size_t nbytes, int timeout = -1) noexcept:
-            ::iomp_aio({ fildes, buf, nbytes, 0, timeout_ms, &AsyncIO::complete }) {
+            ::iomp_aio({ fildes, buf, nbytes, 0, timeout, &AsyncIO::complete }) {
     }
     virtual ~AsyncIO() noexcept { }
     AsyncIO(const AsyncIO&) noexcept = delete;

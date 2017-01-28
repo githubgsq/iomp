@@ -121,7 +121,7 @@ public:
             return;
         }
         while (1) {
-            int remote = accept4(fildes, nullptr, nullptr, SOCK_NONBLOCK);
+            int remote = accept(fildes, nullptr, nullptr);
             if (remote == -1) {
                 if (errno == EAGAIN) {
                     break;
@@ -136,7 +136,9 @@ public:
                 IOMP_LOG(DEBUG, "accept %d", remote);
                 ::close(remote);
                 int sv[2] = { -1, -1 };
-                socketpair(AF_LOCAL, SOCK_STREAM | SOCK_NONBLOCK, 0, sv);
+                socketpair(AF_LOCAL, SOCK_STREAM, 0, sv);
+                fcntl(sv[0], F_SETFL, fcntl(sv[0], F_GETFL, 0) | O_NONBLOCK);
+                fcntl(sv[1], F_SETFL, fcntl(sv[1], F_GETFL, 0) | O_NONBLOCK);
                 auto r = new Reader(sv[0], _iomp);
                 _waits.push_back(r->get_future());
                 _iomp.read(r);
@@ -160,7 +162,7 @@ int main(int argc, char* argv[]) {
     });
     ::iomp_loglevel(IOMP_LOGLEVEL_DEBUG);
     ::iomp::IOMultiPlexer iomp;
-    Acceptor accp { "0.0.0.0", "8643", iomp };
+    Acceptor accp { "127.0.0.1", "8643", iomp };
     ::iomp_accept(iomp, &accp);
 #if 0
     std::vector<std::future<void>> waits;
